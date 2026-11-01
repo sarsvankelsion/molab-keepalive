@@ -1,6 +1,7 @@
 profile/
+profiles/
 config.json
-last_ssh.txt
+last_ssh*.txt
 *.log
 *.tmp
 error.png

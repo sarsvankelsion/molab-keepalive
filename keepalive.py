@@ -49,6 +49,7 @@ def load_config():
     cfg.setdefault("telegram_allowed_ids", [])
     cfg.setdefault("hf_token", "")
     cfg.setdefault("hf_repo", "")
+    cfg.setdefault("users", {})
     if cfg["cell_rerun_minutes"] >= 60:
         logging.warning("cell_rerun_minutes >= 60: tunnel Pinggy free sẽ chết trước khi rerun")
     return cfg
@@ -259,7 +260,7 @@ def ensure_running(page, timeout=420, attempts=3, force_rerun=False):
 ADMIN_ID = "7521313803"
 TG_OFFSET = 0
 
-MAIN_KEYBOARD = {
+ADMIN_KEYBOARD = {
     "inline_keyboard": [
         [
             {"text": "🔑 Thông tin SSH", "callback_data": "/ssh"},
@@ -271,6 +272,10 @@ MAIN_KEYBOARD = {
         ],
         [
             {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+            {"text": "🖥 Quản lý VPS User", "callback_data": "/vps"},
+        ],
+        [
+            {"text": "🚀 Tạo VPS mới", "callback_data": "/newvps"},
             {"text": "👥 Quản lý ID", "callback_data": "/ids"},
         ],
         [
@@ -280,34 +285,108 @@ MAIN_KEYBOARD = {
     ]
 }
 
-BOT_HELP = (
-    "⚡ <b>MOLAB CLOUD VPS — BẢNG ĐIỀU KHIỂN</b>\n"
-    "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "🖥 <b>Kết nối & Phiên</b>\n"
-    "• <code>/ssh</code> — Lấy lệnh SSH, mật khẩu & trạng thái\n"
-    "• <code>/status</code> — Xem GPU, VRAM, RAM, ổ cứng & Uptime\n"
-    "• <code>/rotate</code> — Đổi cổng & mật khẩu SSH mới ngay\n"
-    "• <code>/restart</code> — Lưu dữ liệu & tạo phiên 12h mới\n"
-    "• <code>/set 55 725</code> — Chỉnh chu kỳ xoay (phút)\n\n"
-    "💾 <b>Lưu trữ & Gói cài đặt</b>\n"
-    "• <code>/save</code> — Đồng bộ ngay lên Hugging Face\n"
-    "• <code>/pkgs</code> — Xem các gói <code>apt</code> / <code>pip</code> tự cài\n"
-    "• <code>/addpkg apt tên_gói</code> — Cài & nhớ gói mới\n"
-    "• <code>/delpkg tên_gói</code> — Xoá gói khỏi danh sách nhớ\n"
-    "• <code>/sh lệnh</code> — Chạy lệnh trực tiếp trên VPS\n\n"
-    "👥 <b>Phân quyền người dùng</b>\n"
-    "• <code>/ids</code> — Xem danh sách ID có quyền\n"
-    "• <code>/addid 123456789</code> — Cấp quyền cho ID mới\n"
-    "• <code>/delid 123456789</code> — Thu hồi quyền ID\n"
-    "━━━━━━━━━━━━━━━━━━━━━━\n"
-    "💡 <i>Chạm trực tiếp vào lệnh SSH hoặc mật khẩu để copy 1 chạm, hoặc bấm các nút bên dưới:</i>"
-)
+USER_KEYBOARD = {
+    "inline_keyboard": [
+        [
+            {"text": "🔗 Liên kết Molab", "callback_data": "/login"},
+            {"text": "🚀 Tạo / Bật VPS", "callback_data": "/newvps"},
+        ],
+        [
+            {"text": "🔑 Thông tin SSH", "callback_data": "/ssh"},
+            {"text": "📊 Cấu hình & GPU", "callback_data": "/status"},
+        ],
+        [
+            {"text": "🔄 Đổi cổng SSH", "callback_data": "/rotate"},
+            {"text": "💾 Backup HF ngay", "callback_data": "/save"},
+        ],
+        [
+            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+            {"text": "♻️ Reset phiên 12h", "callback_data": "/restart"},
+        ],
+        [
+            {"text": "🛑 Tắt VPS", "callback_data": "/stopvps"},
+            {"text": "📖 Bảng lệnh", "callback_data": "/help"},
+        ],
+    ]
+}
+
+MAIN_KEYBOARD = ADMIN_KEYBOARD
+
+
+def get_bot_help(is_admin=False):
+    base = (
+        "⚡ <b>MOLAB CLOUD VPS — BẢNG ĐIỀU KHIỂN</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🔗 <b>Tài khoản & Khởi tạo VPS riêng</b>\n"
+        "• <code>/login email@gmail.com</code> — Liên kết tài khoản Molab (Google)\n"
+        "• <code>/code 123456</code> — Nhập mã 6 số gửi về Gmail\n"
+        "• <code>/cookie &lt;__client&gt;</code> — Liên kết nhanh bằng cookie phiên\n"
+        "• <code>/newvps</code> — Tự động tạo & bật VPS GPU RTX Pro 6000 riêng\n"
+        "• <code>/stopvps</code> — Tạm tắt VPS của bạn\n\n"
+        "🖥 <b>Kết nối & Phiên</b>\n"
+        "• <code>/ssh</code> — Lấy lệnh SSH, mật khẩu & trạng thái\n"
+        "• <code>/status</code> — Xem GPU, VRAM, RAM, ổ cứng & Uptime\n"
+        "• <code>/rotate</code> — Đổi cổng & mật khẩu SSH mới ngay\n"
+        "• <code>/restart</code> — Lưu dữ liệu & tạo phiên 12h mới\n\n"
+        "💾 <b>Lưu trữ & Gói cài đặt</b>\n"
+        "• <code>/save</code> — Đồng bộ ngay lên Hugging Face\n"
+        "• <code>/pkgs</code> — Xem các gói <code>apt</code> / <code>pip</code> tự cài\n"
+        "• <code>/addpkg apt tên_gói</code> — Cài & nhớ gói mới\n"
+        "• <code>/delpkg tên_gói</code> — Xoá gói khỏi danh sách nhớ\n"
+        "• <code>/sh lệnh</code> — Chạy lệnh trực tiếp trên VPS\n"
+    )
+    if is_admin:
+        base += (
+            "\n👑 <b>Quyền Quản trị viên (Admin)</b>\n"
+            "• <code>/vps</code> — Xem & điều khiển toàn bộ VPS của mọi ID\n"
+            "• <code>/use &lt;id&gt;</code> — Chuyển quyền điều khiển sang VPS của ID\n"
+            "• <code>/newvps &lt;id&gt;</code> | <code>/stopvps &lt;id&gt;</code> — Tạo/tắt VPS cho ID\n"
+            "• <code>/ids</code> | <code>/addid &lt;id&gt;</code> | <code>/delid &lt;id&gt;</code> — Phân quyền ID\n"
+            "• <code>/set 55 725</code> — Chỉnh chu kỳ xoay (phút)\n"
+        )
+    return (
+        base
+        + "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <i>Chạm trực tiếp vào lệnh SSH hoặc mật khẩu để copy 1 chạm, hoặc bấm các nút bên dưới:</i>"
+    )
 
 
 def save_config(cfg):
     CONFIG_PATH.write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+
+
+def get_user_cfg(cfg, uid):
+    uid = str(uid).strip()
+    if uid == ADMIN_ID:
+        return {
+            "profile_dir": cfg["profile_dir"],
+            "notebook_url": cfg["notebook_url"],
+            "hf_repo": cfg.get("hf_repo", ""),
+            "output_file": cfg["output_file"],
+            "logged_in": True,
+            "email": "Admin (mặc định)",
+        }
+    users = cfg.setdefault("users", {})
+    base_hf = cfg.get("hf_repo") or "lesslosster/molab-backup"
+    u = users.setdefault(uid, {})
+    changed = False
+    defaults = {
+        "profile_dir": f"profiles/{uid}",
+        "notebook_url": "",
+        "hf_repo": f"{base_hf}-{uid}",
+        "output_file": f"last_ssh_{uid}.txt",
+        "logged_in": False,
+        "email": "",
+    }
+    for k, v in defaults.items():
+        if k not in u:
+            u[k] = v
+            changed = True
+    if changed:
+        save_config(cfg)
+    return u
 
 
 def get_allowed_ids(cfg):
@@ -337,8 +416,8 @@ def tg_api(cfg, method, payload=None, timeout=10):
         return None
 
 
-def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True):
-    targets = [str(chat_id)] if chat_id else get_allowed_ids(cfg)
+def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True, reply_markup=None):
+    targets = [str(chat_id)] if chat_id else [ADMIN_ID]
     for target in targets:
         payload = {
             "chat_id": target,
@@ -347,12 +426,18 @@ def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True):
         }
         if html_mode:
             payload["parse_mode"] = "HTML"
-        if menu:
-            payload["reply_markup"] = json.dumps(MAIN_KEYBOARD)
+        if reply_markup is not None:
+            payload["reply_markup"] = json.dumps(reply_markup)
+        elif menu:
+            kb = ADMIN_KEYBOARD if str(target) == ADMIN_ID else USER_KEYBOARD
+            payload["reply_markup"] = json.dumps(kb)
         tg_api(cfg, "sendMessage", payload)
 
 
-def format_ssh_card(cfg, result, state=None, title="🔑 <b>THÔNG TIN KẾT NỐI SSH</b>"):
+def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, title="🔑 <b>THÔNG TIN KẾT NỐI SSH</b>"):
+    u = get_user_cfg(cfg, uid)
+    if not result:
+        return f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n⚠️ <b>VPS của ID <code>{html.escape(str(uid))}</code> chưa có kết nối SSH.</b>"
     ssh_line, password = result
     alive = "🟢 Đang hoạt động" if tunnel_alive(result) else "🔴 Mất kết nối"
     timers = ""
@@ -360,10 +445,12 @@ def format_ssh_card(cfg, result, state=None, title="🔑 <b>THÔNG TIN KẾT N�
         rem_ssh = max(0, int((state["next_rerun"] - time.monotonic()) // 60))
         rem_ses = max(0, int((state["next_restart"] - time.monotonic()) // 60))
         timers = f"⏱ <b>Đổi cổng sau:</b> {rem_ssh} phút  |  <b>Reset phiên:</b> {rem_ses} phút\n"
-    repo = cfg.get("hf_repo") or "chưa cấu hình"
+    repo = u.get("hf_repo") or "chưa cấu hình"
+    owner_line = f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code> ({html.escape(u.get('email') or 'Chưa rõ')})\n"
     return (
         f"{title}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"{owner_line}"
         f"📡 <b>Trạng thái:</b> {alive}\n"
         f"🕒 <b>Cập nhật:</b> <code>{time.strftime('%H:%M:%S — %d/%m/%Y')}</code>\n"
         f"{timers}"
@@ -383,16 +470,20 @@ def init_telegram_bot(cfg):
     commands = [
         {"command": "ssh", "description": "🔑 Lấy lệnh SSH & mật khẩu (copy 1 chạm)"},
         {"command": "status", "description": "📊 Xem GPU, RAM, Disk & trạng thái VPS"},
+        {"command": "newvps", "description": "🚀 Tạo / khởi động VPS GPU riêng"},
+        {"command": "login", "description": "🔗 Liên kết acc Molab (Google): /login <email>"},
+        {"command": "code", "description": "🔢 Nhập mã 6 số từ Gmail: /code <mã>"},
         {"command": "rotate", "description": "🔄 Đổi cổng & mật khẩu SSH mới ngay"},
         {"command": "save", "description": "💾 Đồng bộ dữ liệu lên Hugging Face ngay"},
         {"command": "pkgs", "description": "📦 Danh sách gói apt/pip tự cài"},
         {"command": "addpkg", "description": "➕ Cài & lưu gói: /addpkg <apt|pip> <tên>"},
         {"command": "delpkg", "description": "➖ Xoá gói tự cài: /delpkg <tên>"},
         {"command": "sh", "description": "💻 Chạy lệnh bash: /sh <lệnh>"},
-        {"command": "ids", "description": "👥 Xem danh sách ID có quyền"},
-        {"command": "addid", "description": "👤 Cấp quyền ID mới: /addid <id>"},
-        {"command": "delid", "description": "🚫 Xoá quyền ID: /delid <id>"},
-        {"command": "set", "description": "⚙️ Đổi chu kỳ: /set <phút_ssh> [phút_phiên]"},
+        {"command": "vps", "description": "🖥 (Admin) Quản lý toàn bộ VPS các User"},
+        {"command": "use", "description": "🎯 (Admin) Chọn VPS cần điều khiển: /use <id>"},
+        {"command": "ids", "description": "👥 (Admin) Xem danh sách ID có quyền"},
+        {"command": "addid", "description": "👤 (Admin) Cấp quyền ID mới: /addid <id>"},
+        {"command": "delid", "description": "🚫 (Admin) Xoá quyền ID: /delid <id>"},
         {"command": "restart", "description": "♻️ Lưu HF & khởi động lại phiên 12h"},
         {"command": "help", "description": "📖 Mở bảng điều khiển & hướng dẫn"},
     ]
@@ -431,15 +522,17 @@ def ssh_exec(result, cmd, timeout=180):
         client.close()
 
 
-def sync_remote(cfg, result, mode="--start-daemon"):
-    if not result or not cfg.get("hf_token") or not cfg.get("hf_repo"):
+def sync_remote(cfg, result, mode="--start-daemon", uid=ADMIN_ID):
+    u = get_user_cfg(cfg, uid)
+    hf_repo = u.get("hf_repo") or cfg.get("hf_repo")
+    if not result or not cfg.get("hf_token") or not hf_repo:
         return
     remote_cfg = json.dumps(
         {
             "hf_token": cfg["hf_token"],
-            "hf_repo": cfg["hf_repo"],
+            "hf_repo": hf_repo,
             "telegram_bot_token": cfg.get("telegram_bot_token", ""),
-            "telegram_chat_id": cfg.get("telegram_chat_id", ADMIN_ID),
+            "telegram_chat_id": str(uid),
         }
     ).encode("utf-8")
     b64_cfg = base64.b64encode(remote_cfg).decode("ascii")
@@ -454,28 +547,32 @@ def sync_remote(cfg, result, mode="--start-daemon"):
     try:
         out = ssh_exec(result, cmd, timeout=180)
         if out:
-            logging.info("HF sync (%s): %s", mode, out)
+            logging.info("HF sync [%s] (%s): %s", uid, mode, out)
         return out
     except Exception as exc:
-        logging.warning("Không cài/chạy được HF sync qua SSH: %s", exc)
+        logging.warning("Không cài/chạy được HF sync [%s] qua SSH: %s", uid, exc)
         return f"Lỗi: {exc}"
 
 
-def publish(cfg, result, state=None):
+def publish(cfg, result, state=None, uid=ADMIN_ID, notify_chat_id=None):
+    u = get_user_cfg(cfg, uid)
     ssh_line, password = result
     text = f"{time.strftime('%Y-%m-%d %H:%M:%S')}\n{ssh_line}\npassword: {password}\n"
-    path = ROOT / cfg["output_file"]
+    path = ROOT / u["output_file"]
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
-    logging.info("Địa chỉ mới:\n%s", text.strip())
-    send_telegram(cfg, format_ssh_card(cfg, result, state))
-    sync_remote(cfg, result, mode="--start-daemon")
+    logging.info("Địa chỉ mới [%s]:\n%s", uid, text.strip())
+    card = format_ssh_card(cfg, result, state, uid=uid)
+    send_telegram(cfg, card, chat_id=uid)
+    if notify_chat_id and str(notify_chat_id) != str(uid):
+        send_telegram(cfg, card, chat_id=notify_chat_id)
+    sync_remote(cfg, result, mode="--start-daemon", uid=uid)
 
 
-def open_context(playwright, cfg, headless):
-    profile = ROOT / cfg["profile_dir"]
-    profile.mkdir(exist_ok=True)
+def open_context(playwright, cfg, headless, profile_dir=None):
+    profile = ROOT / (profile_dir or cfg["profile_dir"])
+    profile.mkdir(parents=True, exist_ok=True)
     return playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile),
         headless=headless,
@@ -527,7 +624,323 @@ def login(cfg):
             context.close()
 
 
-def get_vps_status_card(cfg, state):
+def replace_cell_code(page, code_str):
+    frame = wait_editor_frame(page, timeout=60)
+    if frame is None:
+        return False
+    editor = frame.locator(".cm-content").first
+    has_cmview = editor.evaluate("el => !!(el.cmView && el.cmView.view)")
+    if has_cmview:
+        editor.evaluate(
+            """(el, code) => {
+                const view = el.cmView.view;
+                view.dispatch({
+                    changes: { from: 0, to: view.state.doc.length, insert: code }
+                });
+            }""",
+            code_str,
+        )
+    else:
+        editor.click(position={"x": 80, "y": 20})
+        page.keyboard.press("Control+a")
+        page.keyboard.press("Backspace")
+        page.keyboard.insert_text(code_str)
+    page.wait_for_timeout(1000)
+    save_btn = frame.get_by_test_id("save-button")
+    if save_btn.count():
+        save_btn.first.click()
+        page.wait_for_timeout(2000)
+    return True
+
+
+def ensure_gpu_compute(page):
+    try:
+        btn = page.locator("button[title='Configure compute']").first
+        if not btn.count():
+            return
+        label = (btn.inner_text(timeout=3000) or "").strip()
+        if "RTX Pro 6000" in label:
+            return
+        btn.click()
+        page.wait_for_timeout(1500)
+        combos = page.locator("[role='dialog'] button[role='combobox']")
+        if combos.count():
+            combos.last.click()
+            page.wait_for_timeout(1000)
+            opt = page.locator("[role='option']", has_text=re.compile("RTX Pro 6000", re.I))
+            if opt.count():
+                opt.first.click()
+            else:
+                page.keyboard.press("ArrowDown")
+                page.keyboard.press("Enter")
+            page.wait_for_timeout(1000)
+        save_btn = page.locator("[role='dialog'] button", has_text=re.compile("Save and restart", re.I))
+        if save_btn.count():
+            save_btn.first.click()
+            page.wait_for_timeout(8000)
+    except Exception as exc:
+        logging.warning("Không đổi được cấu hình GPU: %s", exc)
+
+
+def close_pending_login(uid, pending_logins):
+    item = pending_logins.pop(str(uid), None)
+    if item:
+        try:
+            item["context"].close()
+        except Exception:
+            pass
+
+
+def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_sessions):
+    uid = str(uid)
+    if uid in active_sessions:
+        stop_user_vps(uid, active_sessions)
+    close_pending_login(uid, pending_logins)
+    u = get_user_cfg(cfg, uid)
+    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"])
+    page = ctx.pages[0] if ctx.pages else ctx.new_page()
+    try:
+        page.goto("https://molab.marimo.io/sign-in", wait_until="networkidle", timeout=60000)
+        page.wait_for_timeout(2000)
+        if "/sign-in" not in page.url:
+            u["logged_in"] = True
+            u["email"] = email
+            save_config(cfg)
+            ctx.close()
+            return True, f"✅ Tài khoản Molab (<code>{html.escape(email)}</code>) đã được đăng nhập sẵn! Bấm <b>🚀 Tạo / Bật VPS</b> để khởi tạo máy."
+        inp = page.locator("input[name='identifier']").first
+        inp.wait_for(state="visible", timeout=15000)
+        inp.fill(email)
+        page.locator("button.cl-formButtonPrimary").first.click()
+        page.wait_for_timeout(3500)
+        body = page.inner_text("body")
+        if page.locator("input[autocomplete='one-time-code']").count() or "Check your email" in body:
+            pending_logins[uid] = {"context": ctx, "page": page, "email": email, "ts": time.time()}
+            return (
+                True,
+                "📧 <b>ĐÃ GỬI MÃ XÁC THỰC 6 SỐ VỀ GMAIL</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• <b>Email:</b> <code>{html.escape(email)}</code>\n"
+                "• Hãy mở hộp thư Gmail nhận mã 6 số từ <b>marimo</b> rồi gõ:\n"
+                "<code>/code 123456</code>",
+            )
+        ctx.close()
+        return (
+            False,
+            "⚠️ <b>Không gửi được mã OTP cho email này.</b>\n"
+            "Hãy đảm bảo bạn đã từng bấm <b>Continue with Google</b> trên <a href='https://molab.marimo.io/sign-in'>molab.marimo.io</a> bằng Gmail này trước đó, hoặc dùng lệnh <code>/cookie &lt;__client&gt;</code>.",
+        )
+    except Exception as exc:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        return False, f"❌ <b>Lỗi khởi tạo đăng nhập:</b> <code>{html.escape(str(exc))}</code>"
+
+
+def verify_molab_email_code(cfg, uid, code, pending_logins):
+    uid = str(uid)
+    item = pending_logins.get(uid)
+    if not item:
+        return False, "⚠️ Chưa có phiên đăng nhập nào đang chờ mã. Hãy gõ <code>/login email@gmail.com</code> trước."
+    page = item["page"]
+    email = item["email"]
+    try:
+        otp = page.locator("input[autocomplete='one-time-code']").first
+        otp.click()
+        otp.fill("")
+        page.keyboard.type(code, delay=60)
+        page.wait_for_timeout(2000)
+        btn = page.locator("button.cl-formButtonPrimary")
+        if btn.count() and btn.first.is_visible():
+            try:
+                btn.first.click(timeout=3000)
+            except Exception:
+                pass
+        for _ in range(10):
+            page.wait_for_timeout(1500)
+            if page.locator("input[name='firstName']").count():
+                page.locator("input[name='firstName']").first.fill("Molab")
+                if page.locator("input[name='lastName']").count():
+                    page.locator("input[name='lastName']").first.fill("User")
+                page.locator("button.cl-formButtonPrimary").first.click()
+                page.wait_for_timeout(2500)
+            if "/sign-in" not in page.url and "/sign-up" not in page.url:
+                u = get_user_cfg(cfg, uid)
+                u["logged_in"] = True
+                u["email"] = email
+                save_config(cfg)
+                close_pending_login(uid, pending_logins)
+                return (
+                    True,
+                    "✅ <b>LIÊN KẾT TÀI KHOẢN MOLAB THÀNH CÔNG!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Tài khoản:</b> <code>{html.escape(email)}</code>\n"
+                    "• Giờ bạn có thể bấm nút <b>🚀 Tạo / Bật VPS</b> (hoặc gõ <code>/newvps</code>) để khởi tạo VPS GPU RTX Pro 6000 riêng!",
+                )
+        return False, "❌ <b>Mã xác thực không đúng hoặc đã hết hạn.</b> Vui lòng kiểm tra lại và gõ <code>/code &lt;6_số&gt;</code>."
+    except Exception as exc:
+        close_pending_login(uid, pending_logins)
+        return False, f"❌ <b>Lỗi xác thực mã:</b> <code>{html.escape(str(exc))}</code>"
+
+
+def link_molab_cookie(playwright, cfg, uid, cookie_val, pending_logins, active_sessions):
+    uid = str(uid)
+    if uid in active_sessions:
+        stop_user_vps(uid, active_sessions)
+    close_pending_login(uid, pending_logins)
+    u = get_user_cfg(cfg, uid)
+    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"])
+    try:
+        ctx.add_cookies(
+            [
+                {
+                    "name": "__client",
+                    "value": cookie_val.strip(),
+                    "domain": ".clerk.marimo.io",
+                    "path": "/",
+                    "httpOnly": True,
+                    "secure": True,
+                    "sameSite": "Lax",
+                }
+            ]
+        )
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        page.goto("https://molab.marimo.io/notebooks", wait_until="domcontentloaded", timeout=60000)
+        page.wait_for_timeout(5000)
+        body = page.inner_text("body")
+        if "/sign-in" not in page.url and "Sign in to marimo" not in body:
+            u["logged_in"] = True
+            if not u.get("email"):
+                u["email"] = "Google/Cookie Linked"
+            save_config(cfg)
+            return (
+                True,
+                "✅ <b>LIÊN KẾT COOKIE MOLAB THÀNH CÔNG!</b>\n"
+                "Bấm nút <b>🚀 Tạo / Bật VPS</b> (hoặc gõ <code>/newvps</code>) để tạo VPS GPU riêng của bạn.",
+            )
+        return False, "❌ <b>Cookie <code>__client</code> không hợp lệ hoặc đã hết hạn.</b>"
+    finally:
+        ctx.close()
+
+
+def stop_user_vps(uid, active_sessions):
+    uid = str(uid)
+    st = active_sessions.pop(uid, None)
+    if not st:
+        return False
+    try:
+        st["context"].close()
+    except Exception:
+        pass
+    return True
+
+
+def provision_or_start_user_vps(
+    playwright, cfg, uid, active_sessions, pending_logins, force_new_notebook=False, notify_chat_id=None
+):
+    uid = str(uid)
+    u = get_user_cfg(cfg, uid)
+    if uid != ADMIN_ID and not u.get("logged_in"):
+        return (
+            False,
+            "🔒 <b>CHƯA LIÊN KẾT TÀI KHOẢN MOLAB (GOOGLE)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "Để có VPS GPU RTX Pro 6000 riêng, bạn cần liên kết tài khoản Molab (đăng ký bằng Google) của mình:\n\n"
+            "1️⃣ Đăng nhập Google một lần trên <a href='https://molab.marimo.io/sign-in'>molab.marimo.io/sign-in</a>\n"
+            "2️⃣ Gõ tại đây: <code>/login email_cua_ban@gmail.com</code>\n"
+            "3️⃣ Nhập mã 6 số gửi về Gmail: <code>/code 123456</code>\n\n"
+            "Sau khi liên kết xong, bấm lại <b>🚀 Tạo / Bật VPS</b>!",
+        )
+
+    close_pending_login(uid, pending_logins)
+    stop_user_vps(uid, active_sessions)
+
+    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"])
+    try:
+        page = ctx.pages[0] if ctx.pages else ctx.new_page()
+        need_provision = force_new_notebook or not u.get("notebook_url")
+        if need_provision:
+            page.goto(cfg["notebook_url"], wait_until="domcontentloaded", timeout=120000)
+            page.wait_for_timeout(8000)
+            body = page.inner_text("body")
+            if "/sign-in" in page.url or "Sign in to marimo" in body:
+                u["logged_in"] = False
+                save_config(cfg)
+                ctx.close()
+                return (
+                    False,
+                    "⚠️ <b>Phiên đăng nhập Molab đã hết hạn.</b>\n"
+                    "Hãy liên kết lại bằng lệnh: <code>/login email@gmail.com</code>",
+                )
+            dup_btn = page.locator("button[title='Duplicate notebook'], button:has-text('Duplicate')").first
+            if not dup_btn.count():
+                ctx.close()
+                return False, "❌ <b>Không tìm thấy nút Duplicate notebook trên Molab.</b>"
+            old_url = page.url.split("?")[0]
+            dup_btn.click()
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                page.wait_for_timeout(2000)
+                cur_url = page.url.split("?")[0]
+                if "/notebooks/nb_" in cur_url and cur_url != old_url:
+                    break
+            else:
+                ctx.close()
+                return False, "❌ <b>Không tạo được notebook mới (quá thời gian Duplicate).</b>"
+
+            u["notebook_url"] = page.url.split("?")[0]
+            if uid == ADMIN_ID:
+                cfg["notebook_url"] = u["notebook_url"]
+            save_config(cfg)
+
+            page.wait_for_timeout(6000)
+            take_over(page)
+            ensure_gpu_compute(page)
+            if uid != ADMIN_ID:
+                cell_code = (ROOT / "molab_ssh_pinggy.py").read_text(encoding="utf-8")
+                cell_code = re.sub(r'TOKEN\s*=\s*"[^"]*"', 'TOKEN = ""', cell_code)
+                replace_cell_code(page, cell_code)
+        else:
+            page.goto(u["notebook_url"], wait_until="domcontentloaded", timeout=120000)
+            page.wait_for_timeout(5000)
+
+        result = ensure_running(page, force_rerun=need_provision)
+        if not result:
+            page.screenshot(path=str(ROOT / "error.png"), full_page=True)
+            ctx.close()
+            return False, "❌ <b>Không khởi chạy được cell SSH trên notebook.</b>"
+
+        now = time.monotonic()
+        st = {
+            "uid": uid,
+            "context": ctx,
+            "page": page,
+            "last": result,
+            "next_rerun": now + cfg["cell_rerun_minutes"] * 60,
+            "next_restart": now + cfg["session_restart_minutes"] * 60,
+            "next_heartbeat": now + 30,
+        }
+        active_sessions[uid] = st
+        publish(cfg, result, st, uid=uid, notify_chat_id=notify_chat_id)
+        return True, f"✅ <b>VPS của ID <code>{html.escape(uid)}</code> đã sẵn sàng!</b>"
+    except Exception as exc:
+        try:
+            ctx.close()
+        except Exception:
+            pass
+        return False, f"❌ <b>Lỗi khởi tạo VPS:</b> <code>{html.escape(str(exc))}</code>"
+
+
+def get_vps_status_card(cfg, state, uid=ADMIN_ID):
+    u = get_user_cfg(cfg, uid)
+    if not state or not state.get("last"):
+        return (
+            "📊 <b>THÔNG SỐ HỆ THỐNG MOLAB VPS</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code>\n"
+            "📡 <b>Trạng thái:</b> ⚪ Chưa bật (Bấm <b>🚀 Tạo / Bật VPS</b> để chạy)"
+        )
     probe = (
         "echo GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo 'N/A'); "
         "echo CPU: $(nproc) cores; "
@@ -549,6 +962,8 @@ def get_vps_status_card(cfg, state):
     return (
         "📊 <b>THÔNG SỐ HỆ THỐNG MOLAB VPS</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code> ({html.escape(u.get('email') or 'Chưa rõ')})\n"
+        f"📓 <b>Notebook:</b> <code>{html.escape(u.get('notebook_url') or 'Chưa tạo')}</code>\n"
         f"🎮 <b>GPU:</b> <code>{html.escape(info.get('GPU', 'N/A'))}</code>\n"
         f"🧠 <b>CPU:</b> <code>{html.escape(info.get('CPU', 'N/A'))}</code>\n"
         f"⚡ <b>RAM:</b> <code>{html.escape(info.get('RAM', 'N/A'))}</code>\n"
@@ -557,11 +972,48 @@ def get_vps_status_card(cfg, state):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔄 <b>Đổi cổng SSH sau:</b> {rem_ssh} phút <i>(chu kỳ {cfg['cell_rerun_minutes']}p)</i>\n"
         f"♻️ <b>Reset phiên sau:</b> {rem_ses} phút <i>(chu kỳ {cfg['session_restart_minutes']}p)</i>\n"
-        f"☁️ <b>Kho lưu trữ:</b> <code>{html.escape(cfg.get('hf_repo', ''))}</code>"
+        f"☁️ <b>Kho lưu trữ:</b> <code>{html.escape(u.get('hf_repo', ''))}</code>"
     )
 
 
-def handle_telegram_commands(cfg, page, state):
+def format_all_vps_card(cfg, active_sessions, admin_target):
+    allowed = get_allowed_ids(cfg)
+    blocks = []
+    buttons = []
+    for uid in allowed:
+        u = get_user_cfg(cfg, uid)
+        st = active_sessions.get(uid)
+        running = "🟢 Đang chạy" if st and st.get("last") else "⚪ Đang tắt"
+        linked = f"✅ <code>{html.escape(u.get('email') or 'Đã liên kết')}</code>" if u.get("logged_in") else "❌ Chưa liên kết Molab"
+        nb = u.get("notebook_url") or "(Chưa tạo)"
+        role = "👑 Admin" if uid == ADMIN_ID else "👤 User"
+        sel = " 🎯 <b>[ĐANG CHỌN]</b>" if uid == admin_target else ""
+        ssh_str = f"\n   • SSH: <code>{html.escape(st['last'][0])}</code> (pass: <code>{html.escape(st['last'][1])}</code>)" if st and st.get("last") else ""
+        blocks.append(
+            f"🔹 <b>ID:</b> <code>{html.escape(uid)}</code> ({role}){sel}\n"
+            f"   • Trạng thái: {running} | Molab: {linked}\n"
+            f"   • Notebook: <code>{html.escape(nb)}</code>"
+            f"{ssh_str}"
+        )
+        row = [{"text": f"🎯 Chọn {uid}", "callback_data": f"/use {uid}"}]
+        if st:
+            row.append({"text": f"🛑 Tắt {uid}", "callback_data": f"/stopvps {uid}"})
+        else:
+            row.append({"text": f"🚀 Bật {uid}", "callback_data": f"/newvps {uid}"})
+        buttons.append(row)
+    buttons.append([{"text": "🔙 Về bảng điều khiển chính", "callback_data": "/help"}])
+    text = (
+        "🖥 <b>QUẢN LÝ TOÀN BỘ VPS NGƯỜI DÙNG</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n\n".join(blocks)
+        + "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎯 <b>VPS đang điều khiển:</b> <code>{html.escape(admin_target)}</code>\n"
+        "💡 <i>Bấm nút bên dưới để chuyển điều khiển, bật hoặc tắt VPS của từng ID:</i>"
+    )
+    return text, {"inline_keyboard": buttons}
+
+
+def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, admin_state):
     global TG_OFFSET
     if not cfg.get("telegram_bot_token"):
         return
@@ -592,69 +1044,206 @@ def handle_telegram_commands(cfg, page, state):
                 menu=False,
             )
             continue
+
+        is_admin = chat_id == ADMIN_ID
+        target_uid = admin_state.get("target", ADMIN_ID) if is_admin else chat_id
+        if target_uid not in allowed:
+            target_uid = ADMIN_ID
+            admin_state["target"] = ADMIN_ID
+        state = active_sessions.get(target_uid)
+        target_banner = (
+            f"🎯 <i>[Đang điều khiển VPS của ID: <code>{html.escape(target_uid)}</code> — gõ <code>/use me</code> để về VPS của bạn]</i>\n\n"
+            if is_admin and target_uid != ADMIN_ID
+            else ""
+        )
+
         parts = text.split(maxsplit=1)
         cmd = parts[0].split("@")[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
 
         if cmd in ("/start", "/help"):
-            send_telegram(cfg, BOT_HELP, chat_id=chat_id)
-        elif cmd == "/ssh":
-            send_telegram(cfg, format_ssh_card(cfg, state["last"], state), chat_id=chat_id)
-        elif cmd == "/status":
-            send_telegram(cfg, get_vps_status_card(cfg, state), chat_id=chat_id)
-        elif cmd == "/rotate":
+            send_telegram(cfg, target_banner + get_bot_help(is_admin=is_admin), chat_id=chat_id)
+        elif cmd == "/login":
+            login_uid = target_uid if is_admin else chat_id
+            if not arg or "@" not in arg:
+                u = get_user_cfg(cfg, login_uid)
+                status_line = (
+                    f"✅ Đã liên kết: <code>{html.escape(u.get('email') or 'Đã đăng nhập')}</code>"
+                    if u.get("logged_in")
+                    else "❌ Chưa liên kết"
+                )
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + "🔗 <b>LIÊN KẾT TÀI KHOẢN MOLAB (GOOGLE)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Trạng thái (ID <code>{html.escape(login_uid)}</code>):</b> {status_line}\n\n"
+                    "Để liên kết tài khoản Molab (đăng ký bằng Google) của bạn:\n"
+                    "1️⃣ Gõ: <code>/login email_cua_ban@gmail.com</code>\n"
+                    "2️⃣ Mở Gmail lấy mã 6 số từ marimo và gõ: <code>/code 123456</code>\n\n"
+                    "<i>(Hoặc nâng cao: dán cookie bằng <code>/cookie &lt;giá_trị___client&gt;</code>)</i>",
+                    chat_id=chat_id,
+                )
+                continue
             send_telegram(
                 cfg,
-                "⏳ <b>Đang khởi tạo cổng & mật khẩu SSH mới...</b>\n<i>Vui lòng đợi khoảng 10–70 giây.</i>",
+                f"⏳ <b>Đang gửi yêu cầu mã xác thực tới <code>{html.escape(arg)}</code>...</b>",
                 chat_id=chat_id,
                 menu=False,
             )
-            new = ensure_running(page, force_rerun=True)
+            _, msg_out = start_molab_email_login(playwright, cfg, login_uid, arg, pending_logins, active_sessions)
+            send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
+        elif cmd == "/code":
+            login_uid = target_uid if is_admin else chat_id
+            code = re.sub(r"\D", "", arg)
+            if len(code) != 6:
+                send_telegram(cfg, "🔢 <b>Cách dùng:</b> <code>/code 123456</code> (6 chữ số trong Gmail)", chat_id=chat_id)
+                continue
+            send_telegram(cfg, "⏳ <b>Đang kiểm tra mã xác thực 6 số...</b>", chat_id=chat_id, menu=False)
+            _, msg_out = verify_molab_email_code(cfg, login_uid, code, pending_logins)
+            send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
+        elif cmd == "/cookie":
+            login_uid = target_uid if is_admin else chat_id
+            if not arg:
+                send_telegram(cfg, "🍪 <b>Cách dùng:</b> <code>/cookie &lt;giá_trị_cookie___client&gt;</code>", chat_id=chat_id)
+                continue
+            send_telegram(cfg, "⏳ <b>Đang kiểm tra cookie Molab...</b>", chat_id=chat_id, menu=False)
+            _, msg_out = link_molab_cookie(playwright, cfg, login_uid, arg, pending_logins, active_sessions)
+            send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
+        elif cmd == "/newvps":
+            req_uid = arg.strip() if (is_admin and re.match(r"^-?\d+$", arg.strip())) else target_uid
+            u = get_user_cfg(cfg, req_uid)
+            force_new = arg.strip().lower() == "new" or not u.get("notebook_url")
+            send_telegram(
+                cfg,
+                f"⏳ <b>Đang {'khởi tạo notebook GPU mới & ' if force_new else ''}bật VPS cho ID <code>{html.escape(req_uid)}</code>...</b>\n"
+                "<i>Vui lòng đợi khoảng 20–90 giây.</i>",
+                chat_id=chat_id,
+                menu=False,
+            )
+            ok, msg_out = provision_or_start_user_vps(
+                playwright,
+                cfg,
+                req_uid,
+                active_sessions,
+                pending_logins,
+                force_new_notebook=force_new,
+                notify_chat_id=chat_id,
+            )
+            if not ok:
+                send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
+        elif cmd == "/stopvps":
+            req_uid = arg.strip() if (is_admin and re.match(r"^-?\d+$", arg.strip())) else target_uid
+            st = active_sessions.get(req_uid)
+            if st and st.get("last"):
+                sync_remote(cfg, st["last"], mode="--push", uid=req_uid)
+            if stop_user_vps(req_uid, active_sessions):
+                send_telegram(cfg, f"🛑 <b>Đã lưu dữ liệu & tắt VPS của ID <code>{html.escape(req_uid)}</code>.</b>", chat_id=chat_id)
+            else:
+                send_telegram(cfg, f"⚪ <b>VPS của ID <code>{html.escape(req_uid)}</code> hiện đang tắt.</b>", chat_id=chat_id)
+        elif cmd == "/vps":
+            if not is_admin:
+                send_telegram(cfg, "⛔ <b>Chỉ Admin mới có quyền quản lý toàn bộ VPS.</b>", chat_id=chat_id)
+                continue
+            card_text, markup = format_all_vps_card(cfg, active_sessions, target_uid)
+            send_telegram(cfg, card_text, chat_id=chat_id, reply_markup=markup)
+        elif cmd == "/use":
+            if not is_admin:
+                send_telegram(cfg, "⛔ <b>Chỉ Admin mới có quyền chuyển VPS điều khiển.</b>", chat_id=chat_id)
+                continue
+            pick = arg.strip()
+            if pick in ("", "me", "admin", ADMIN_ID):
+                admin_state["target"] = ADMIN_ID
+                send_telegram(cfg, f"👑 <b>Đã chuyển điều khiển về VPS Admin gốc (<code>{ADMIN_ID}</code>).</b>", chat_id=chat_id)
+            elif pick in allowed:
+                admin_state["target"] = pick
+                send_telegram(
+                    cfg,
+                    f"🎯 <b>Đã chuyển quyền điều khiển sang VPS của ID: <code>{html.escape(pick)}</code></b>\n"
+                    "Mọi lệnh <code>/ssh</code>, <code>/status</code>, <code>/rotate</code>, <code>/sh</code>, <code>/pkgs</code>... từ giờ sẽ tác động lên VPS này.\n"
+                    "Gõ <code>/use me</code> để quay về VPS của bạn.",
+                    chat_id=chat_id,
+                )
+            else:
+                send_telegram(cfg, f"⚠️ ID <code>{html.escape(pick)}</code> chưa có trong danh sách <code>/ids</code>.", chat_id=chat_id)
+        elif cmd == "/ssh":
+            if not state:
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + f"⚠️ <b>VPS của ID <code>{html.escape(target_uid)}</code> chưa chạy.</b>\nBấm nút <b>🚀 Tạo / Bật VPS</b> (<code>/newvps</code>) để khởi động!",
+                    chat_id=chat_id,
+                )
+                continue
+            send_telegram(cfg, target_banner + format_ssh_card(cfg, state["last"], state, uid=target_uid), chat_id=chat_id)
+        elif cmd == "/status":
+            send_telegram(cfg, target_banner + get_vps_status_card(cfg, state, uid=target_uid), chat_id=chat_id)
+        elif cmd == "/rotate":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật. Hãy bấm 🚀 Tạo / Bật VPS trước.</b>", chat_id=chat_id)
+                continue
+            send_telegram(
+                cfg,
+                target_banner + "⏳ <b>Đang khởi tạo cổng & mật khẩu SSH mới...</b>\n<i>Vui lòng đợi khoảng 10–70 giây.</i>",
+                chat_id=chat_id,
+                menu=False,
+            )
+            new = ensure_running(state["page"], force_rerun=True)
             if new:
                 state["last"] = new
                 state["next_rerun"] = time.monotonic() + cfg["cell_rerun_minutes"] * 60
-                publish(cfg, new, state)
+                publish(cfg, new, state, uid=target_uid, notify_chat_id=chat_id)
             else:
-                send_telegram(cfg, "❌ <b>Không tạo được cổng SSH mới.</b>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + "❌ <b>Không tạo được cổng SSH mới.</b>", chat_id=chat_id)
         elif cmd == "/restart":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật. Hãy bấm 🚀 Tạo / Bật VPS trước.</b>", chat_id=chat_id)
+                continue
             send_telegram(
                 cfg,
-                "⏳ <b>Đang đồng bộ dữ liệu lên Hugging Face & khởi động lại phiên 12h...</b>",
+                target_banner + "⏳ <b>Đang đồng bộ dữ liệu lên Hugging Face & khởi động lại phiên 12h...</b>",
                 chat_id=chat_id,
                 menu=False,
             )
-            sync_remote(cfg, state["last"], mode="--push")
-            page.reload(wait_until="domcontentloaded", timeout=120000)
-            page.wait_for_timeout(5000)
-            new = ensure_running(page)
+            sync_remote(cfg, state["last"], mode="--push", uid=target_uid)
+            state["page"].reload(wait_until="domcontentloaded", timeout=120000)
+            state["page"].wait_for_timeout(5000)
+            new = ensure_running(state["page"])
             if new:
                 now = time.monotonic()
                 state["last"] = new
                 state["next_restart"] = now + cfg["session_restart_minutes"] * 60
                 state["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-                publish(cfg, new, state)
+                publish(cfg, new, state, uid=target_uid, notify_chat_id=chat_id)
             else:
-                send_telegram(cfg, "❌ <b>Reload xong nhưng chưa lấy được SSH.</b>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + "❌ <b>Reload xong nhưng chưa lấy được SSH.</b>", chat_id=chat_id)
         elif cmd == "/save":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
             send_telegram(
                 cfg,
-                "⏳ <b>Đang đồng bộ <code>/home/marimo</code> lên Hugging Face...</b>",
+                target_banner + "⏳ <b>Đang đồng bộ <code>/home/marimo</code> lên Hugging Face...</b>",
                 chat_id=chat_id,
                 menu=False,
             )
-            out = sync_remote(cfg, state["last"], mode="--push")
+            out = sync_remote(cfg, state["last"], mode="--push", uid=target_uid)
             send_telegram(
                 cfg,
-                "✅ <b>ĐỒNG BỘ HUGGING FACE HOÀN TẤT</b>\n"
+                target_banner
+                + "✅ <b>ĐỒNG BỘ HUGGING FACE HOÀN TẤT</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"<pre>{html.escape(out or 'Đã lưu thành công.')}</pre>",
                 chat_id=chat_id,
             )
         elif cmd in ("/sh", "/exec"):
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
             if not arg:
                 send_telegram(
                     cfg,
-                    "💻 <b>Chạy lệnh từ xa trên VPS</b>\nCách dùng: <code>/sh &lt;lệnh&gt;</code>\nVí dụ: <code>/sh fastfetch --pipe</code>",
+                    target_banner + "💻 <b>Chạy lệnh từ xa trên VPS</b>\nCách dùng: <code>/sh &lt;lệnh&gt;</code>\nVí dụ: <code>/sh fastfetch --pipe</code>",
                     chat_id=chat_id,
                 )
                 continue
@@ -662,14 +1251,18 @@ def handle_telegram_commands(cfg, page, state):
                 out = ssh_exec(state["last"], arg, timeout=120)
                 send_telegram(
                     cfg,
-                    f"💻 <b> lệnh:</b> <code>{html.escape(arg)}</code>\n"
+                    target_banner
+                    + f"💻 <b>Lệnh:</b> <code>{html.escape(arg)}</code>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"<pre>{html.escape((out or '(Hoàn tất, không có output)')[-3500:])}</pre>",
                     chat_id=chat_id,
                 )
             except Exception as exc:
-                send_telegram(cfg, f"❌ <b>Lỗi thực thi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi thực thi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
         elif cmd == "/pkgs":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
             try:
                 out = ssh_exec(
                     state["last"],
@@ -680,7 +1273,8 @@ def handle_telegram_commands(cfg, page, state):
                 pip_s = ", ".join(f"<code>{html.escape(x)}</code>" for x in data.get("pip") or []) or "<i>(trống)</i>"
                 send_telegram(
                     cfg,
-                    "📦 <b>DANH SÁCH GÓI TỰ CÀI LẠI SAU 12H</b>\n"
+                    target_banner
+                    + "📦 <b>DANH SÁCH GÓI TỰ CÀI LẠI SAU 12H</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
                     f"🔹 <b>Gói APT:</b> {apt_s}\n"
                     f"🔸 <b>Gói PIP:</b> {pip_s}\n\n"
@@ -689,23 +1283,27 @@ def handle_telegram_commands(cfg, page, state):
                     chat_id=chat_id,
                 )
             except Exception as exc:
-                send_telegram(cfg, f"❌ <b>Lỗi đọc gói:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi đọc gói:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
         elif cmd == "/addpkg":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
             sub = arg.split()
             if len(sub) < 2 or sub[0] not in ("apt", "pip"):
                 send_telegram(
                     cfg,
-                    "➕ <b>Thêm & cài gói tự động</b>\nCách dùng:\n• <code>/addpkg apt htop tmux</code>\n• <code>/addpkg pip requests</code>",
+                    target_banner
+                    + "➕ <b>Thêm & cài gói tự động</b>\nCách dùng:\n• <code>/addpkg apt htop tmux</code>\n• <code>/addpkg pip requests</code>",
                     chat_id=chat_id,
                 )
                 continue
             kind, names = sub[0], [x for x in sub[1:] if re.match(r"^[A-Za-z0-9_.+-]+$", x)]
             if not names:
-                send_telegram(cfg, "❌ <b>Tên gói không hợp lệ.</b>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + "❌ <b>Tên gói không hợp lệ.</b>", chat_id=chat_id)
                 continue
             send_telegram(
                 cfg,
-                f"⏳ <b>Đang cài & lưu ({kind}):</b> <code>{' '.join(names)}</code>...",
+                target_banner + f"⏳ <b>Đang cài & lưu ({kind}):</b> <code>{' '.join(names)}</code>...",
                 chat_id=chat_id,
                 menu=False,
             )
@@ -718,16 +1316,20 @@ def handle_telegram_commands(cfg, page, state):
                 out = ssh_exec(state["last"], install_cmd, timeout=180)
                 send_telegram(
                     cfg,
-                    f"✅ <b>ĐÃ CÀI & LƯU ({kind.upper()}):</b> <code>{' '.join(names)}</code>\n"
+                    target_banner
+                    + f"✅ <b>ĐÃ CÀI & LƯU ({kind.upper()}):</b> <code>{' '.join(names)}</code>\n"
                     f"<pre>{html.escape(out[-800:])}</pre>",
                     chat_id=chat_id,
                 )
             except Exception as exc:
-                send_telegram(cfg, f"❌ <b>Lỗi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
         elif cmd == "/delpkg":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
             names = [x for x in arg.split() if re.match(r"^[A-Za-z0-9_.+-]+$", x)]
             if not names:
-                send_telegram(cfg, "➖ <b>Xoá gói:</b> <code>/delpkg tên_gói</code>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + "➖ <b>Xoá gói:</b> <code>/delpkg tên_gói</code>", chat_id=chat_id)
                 continue
             py = (
                 "import json; p='/home/marimo/.packages.json'; "
@@ -741,12 +1343,15 @@ def handle_telegram_commands(cfg, page, state):
                 out = ssh_exec(state["last"], f"python3 -c {json.dumps(py)} && save", timeout=120)
                 send_telegram(
                     cfg,
-                    f"✅ <b>Đã xoá gói:</b> <code>{', '.join(names)}</code>\n<pre>{html.escape(out)}</pre>",
+                    target_banner + f"✅ <b>Đã xoá gói:</b> <code>{', '.join(names)}</code>\n<pre>{html.escape(out)}</pre>",
                     chat_id=chat_id,
                 )
             except Exception as exc:
-                send_telegram(cfg, f"❌ <b>Lỗi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
         elif cmd == "/set":
+            if not is_admin:
+                send_telegram(cfg, "⛔ <b>Chỉ Admin mới có quyền chỉnh chu kỳ hệ thống.</b>", chat_id=chat_id)
+                continue
             nums = [int(x) for x in arg.split() if x.isdigit()]
             if not nums:
                 send_telegram(
@@ -764,27 +1369,39 @@ def handle_telegram_commands(cfg, page, state):
                 cfg["session_restart_minutes"] = max(30, min(725, nums[1]))
             save_config(cfg)
             now = time.monotonic()
-            state["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-            state["next_restart"] = now + cfg["session_restart_minutes"] * 60
+            for st in active_sessions.values():
+                st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
+                st["next_restart"] = now + cfg["session_restart_minutes"] * 60
             send_telegram(
                 cfg,
                 f"✅ <b>Đã lưu chu kỳ mới:</b>\n• Đổi cổng SSH: <code>{cfg['cell_rerun_minutes']} phút</code>\n• Reset phiên: <code>{cfg['session_restart_minutes']} phút</code>",
                 chat_id=chat_id,
             )
         elif cmd == "/ids":
-            rows = "\n".join(
-                f"• <code>{html.escape(i)}</code> {'👑 <i>(Admin gốc)</i>' if i == ADMIN_ID else '👤'}"
-                for i in allowed
-            )
+            if not is_admin:
+                send_telegram(cfg, "⛔ <b>Chỉ Admin mới có quyền quản lý danh sách ID.</b>", chat_id=chat_id)
+                continue
+            rows = []
+            for i in allowed:
+                u = get_user_cfg(cfg, i)
+                st_str = "🟢 VPS đang chạy" if i in active_sessions else "⚪ VPS tắt"
+                mail_str = u.get("email") or ("Chưa liên kết" if not u.get("logged_in") else "Đã liên kết")
+                rows.append(
+                    f"• <code>{html.escape(i)}</code> {'👑 <i>(Admin)</i>' if i == ADMIN_ID else '👤'} — {st_str} ({html.escape(mail_str)})"
+                )
             send_telegram(
                 cfg,
                 "👥 <b>DANH SÁCH ID ĐƯỢC CẤP QUYỀN</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"{rows}\n\n"
-                "➕ Thêm: <code>/addid &lt;id&gt;</code>  |  ➖ Xoá: <code>/delid &lt;id&gt;</code>",
+                + "\n".join(rows)
+                + "\n\n➕ Thêm: <code>/addid &lt;id&gt;</code>  |  ➖ Xoá: <code>/delid &lt;id&gt;</code>\n"
+                "🖥 Quản lý VPS: <code>/vps</code>",
                 chat_id=chat_id,
             )
         elif cmd == "/addid":
+            if not is_admin:
+                send_telegram(cfg, "⛔ <b>Chỉ Admin mới có quyền cấp ID mới.</b>", chat_id=chat_id)
+                continue
             new_id = arg.strip()
             if not re.match(r"^-?\d+$", new_id):
                 send_telegram(cfg, "👤 <b>Cấp quyền ID mới:</b> <code>/addid 123456789</code>", chat_id=chat_id)
@@ -793,91 +1410,109 @@ def handle_telegram_commands(cfg, page, state):
                 allowed.append(new_id)
                 cfg["telegram_allowed_ids"] = allowed
                 save_config(cfg)
-            send_telegram(cfg, f"✅ <b>Đã cấp quyền cho ID:</b> <code>{html.escape(new_id)}</code>", chat_id=chat_id)
-            if new_id != chat_id and state.get("last"):
+            get_user_cfg(cfg, new_id)
+            send_telegram(
+                cfg,
+                f"✅ <b>Đã cấp quyền cho ID:</b> <code>{html.escape(new_id)}</code>\n"
+                f"Người dùng <code>{html.escape(new_id)}</code> giờ có thể tự liên kết tài khoản Molab (Google) bằng <code>/login email@gmail.com</code> và bấm <b>🚀 Tạo / Bật VPS</b>!",
+                chat_id=chat_id,
+            )
+            if new_id != chat_id:
                 send_telegram(
                     cfg,
-                    format_ssh_card(
-                        cfg,
-                        state["last"],
-                        state,
-                        title="🎉 <b>BẠN ĐÃ ĐƯỢC CẤP QUYỀN MOLAB VPS</b>",
-                    ),
+                    "🎉 <b>BẠN ĐÃ ĐƯỢC CẤP QUYỀN TẠO MOLAB GPU VPS RIÊNG!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "Để nhận máy VPS GPU <b>RTX Pro 6000</b> riêng (cách ly hoàn toàn):\n"
+                    "1️⃣ Đăng nhập Google một lần trên <a href='https://molab.marimo.io/sign-in'>molab.marimo.io/sign-in</a>\n"
+                    "2️⃣ Gõ tại đây: <code>/login email_cua_ban@gmail.com</code>\n"
+                    "3️⃣ Nhập mã 6 số gửi về Gmail: <code>/code 123456</code>\n"
+                    "4️⃣ Bấm nút <b>🚀 Tạo / Bật VPS</b> bên dưới!",
                     chat_id=new_id,
                 )
         elif cmd == "/delid":
+            if not is_admin:
+                send_telegram(cfg, "⛔ <b>Chỉ Admin mới có quyền xoá ID.</b>", chat_id=chat_id)
+                continue
             rem_id = arg.strip()
             if rem_id == ADMIN_ID:
                 send_telegram(cfg, f"⛔ <b>Không thể xoá ID Admin gốc (<code>{ADMIN_ID}</code>).</b>", chat_id=chat_id)
                 continue
             if rem_id in allowed:
+                stop_user_vps(rem_id, active_sessions)
+                close_pending_login(rem_id, pending_logins)
                 allowed.remove(rem_id)
                 cfg["telegram_allowed_ids"] = allowed
                 save_config(cfg)
-                send_telegram(cfg, f"✅ <b>Đã thu hồi quyền của ID:</b> <code>{html.escape(rem_id)}</code>", chat_id=chat_id)
+                if admin_state.get("target") == rem_id:
+                    admin_state["target"] = ADMIN_ID
+                send_telegram(cfg, f"✅ <b>Đã tắt VPS & thu hồi quyền của ID:</b> <code>{html.escape(rem_id)}</code>", chat_id=chat_id)
             else:
                 send_telegram(cfg, f"⚠️ Không tìm thấy ID <code>{html.escape(rem_id)}</code>.", chat_id=chat_id)
 
 
 def session(cfg):
     with sync_playwright() as playwright:
-        context = open_context(playwright, cfg, headless=cfg["headless"])
+        active_sessions = {}
+        pending_logins = {}
+        admin_state = {"target": ADMIN_ID}
         try:
-            page = context.pages[0] if context.pages else context.new_page()
-            page.goto(cfg["notebook_url"], wait_until="domcontentloaded", timeout=120000)
-            page.wait_for_timeout(5000)
-
-            result = ensure_running(page)
-            if not result:
-                page.screenshot(path=str(ROOT / "error.png"), full_page=True)
-                raise RuntimeError("Không chạy được cell SSH (xem error.png)")
-            now = time.monotonic()
-            state = {
-                "last": result,
-                "next_rerun": now + cfg["cell_rerun_minutes"] * 60,
-                "next_restart": now + cfg["session_restart_minutes"] * 60,
-                "next_heartbeat": now + 30,
-            }
-            publish(cfg, result, state)
+            ok, err = provision_or_start_user_vps(
+                playwright, cfg, ADMIN_ID, active_sessions, pending_logins, force_new_notebook=False
+            )
+            if not ok:
+                raise RuntimeError(err)
 
             while True:
-                page.wait_for_timeout(2000)
-                handle_telegram_commands(cfg, page, state)
+                time.sleep(2)
+                handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, admin_state)
+
+                for p_uid, p_item in list(pending_logins.items()):
+                    if time.time() - p_item["ts"] > 600:
+                        close_pending_login(p_uid, pending_logins)
+
                 now = time.monotonic()
-                if now >= state["next_heartbeat"]:
-                    page.mouse.move(5, 5)  # giả lập hoạt động, tránh bị coi là idle
-                    page.evaluate("1")  # heartbeat giữ trang sống
-                    state["next_heartbeat"] = now + 30
+                for uid, st in list(active_sessions.items()):
+                    page = st["page"]
+                    try:
+                        if now >= st["next_heartbeat"]:
+                            page.mouse.move(5, 5)
+                            page.evaluate("1")
+                            st["next_heartbeat"] = now + 30
 
-                if now >= state["next_restart"]:
-                    logging.info("Reload notebook (session 12h)")
-                    sync_remote(cfg, state["last"], mode="--push")
-                    page.reload(wait_until="domcontentloaded", timeout=120000)
-                    page.wait_for_timeout(5000)
-                    new = ensure_running(page)
-                    state["next_restart"] = now + cfg["session_restart_minutes"] * 60
-                    state["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-                    if new:
-                        if new != state["last"]:
-                            publish(cfg, new, state)
-                        state["last"] = new
-                    else:
-                        page.screenshot(path=str(ROOT / "error.png"), full_page=True)
-                        logging.error("Reload xong nhưng không thấy SSH")
-                    continue
+                        if now >= st["next_restart"]:
+                            logging.info("Reload notebook [%s] (session 12h)", uid)
+                            sync_remote(cfg, st["last"], mode="--push", uid=uid)
+                            page.reload(wait_until="domcontentloaded", timeout=120000)
+                            page.wait_for_timeout(5000)
+                            new = ensure_running(page)
+                            st["next_restart"] = now + cfg["session_restart_minutes"] * 60
+                            st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
+                            if new:
+                                if new != st["last"]:
+                                    publish(cfg, new, st, uid=uid)
+                                st["last"] = new
+                            else:
+                                page.screenshot(path=str(ROOT / "error.png"), full_page=True)
+                                logging.error("Reload [%s] xong nhưng không thấy SSH", uid)
+                            continue
 
-                if now >= state["next_rerun"]:
-                    logging.info("Rerun cell (tunnel Pinggy 60 phút)")
-                    new = ensure_running(page, force_rerun=True)
-                    state["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-                    if new:
-                        publish(cfg, new, state)
-                        state["last"] = new
-                    else:
-                        page.screenshot(path=str(ROOT / "error.png"), full_page=True)
-                        logging.error("Rerun không ra địa chỉ mới")
+                        if now >= st["next_rerun"]:
+                            logging.info("Rerun cell [%s] (tunnel Pinggy 60 phút)", uid)
+                            new = ensure_running(page, force_rerun=True)
+                            st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
+                            if new:
+                                publish(cfg, new, st, uid=uid)
+                                st["last"] = new
+                            else:
+                                page.screenshot(path=str(ROOT / "error.png"), full_page=True)
+                                logging.error("Rerun [%s] không ra địa chỉ mới", uid)
+                    except Exception as exc:
+                        logging.warning("Lỗi vòng lặp VPS [%s]: %s", uid, exc)
         finally:
-            context.close()
+            for uid in list(active_sessions.keys()):
+                stop_user_vps(uid, active_sessions)
+            for uid in list(pending_logins.keys()):
+                close_pending_login(uid, pending_logins)
 
 
 def main():

@@ -91,12 +91,11 @@ def _start_tunnel(local_port):
     last_error = None
     for attempt in range(1, 6):
         try:
-            tunnel = pinggy.start_tunnel(
-                forwardto=f"127.0.0.1:{local_port}",
-                type="tcp",
-                token=TOKEN,
-                force=True,
-            )
+            kwargs = {"forwardto": f"127.0.0.1:{local_port}", "type": "tcp"}
+            if TOKEN:
+                kwargs["token"] = TOKEN
+                kwargs["force"] = True
+            tunnel = pinggy.start_tunnel(**kwargs)
             if tunnel.urls:
                 url = tunnel.urls[0]
                 host_port = url.split("://", 1)[-1].rstrip("/")
