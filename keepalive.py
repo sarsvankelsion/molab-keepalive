@@ -676,11 +676,11 @@ def replace_cell_code(page, code_str):
 def ensure_gpu_compute(page):
     try:
         btn = page.locator("button[title='Configure compute']").first
-        if not btn.count():
-            return
+        btn.wait_for(state="visible", timeout=30000)
         label = (btn.inner_text(timeout=3000) or "").strip()
         if "RTX Pro 6000" in label:
-            return
+            return True
+        logging.info("Notebook đang ở chế độ CPU (%s), tự động bật GPU RTX Pro 6000...", label)
         btn.click()
         page.wait_for_timeout(1500)
         combos = page.locator("[role='dialog'] button[role='combobox']")
@@ -696,10 +696,18 @@ def ensure_gpu_compute(page):
             page.wait_for_timeout(1000)
         save_btn = page.locator("[role='dialog'] button", has_text=re.compile("Save and restart", re.I))
         if save_btn.count():
-            save_btn.first.click()
-            page.wait_for_timeout(8000)
+            save_btn.last.click()
+            deadline = time.time() + 45
+            while time.time() < deadline:
+                page.wait_for_timeout(2000)
+                cur_label = (btn.inner_text(timeout=3000) or "").strip()
+                if "RTX Pro 6000" in cur_label:
+                    break
+            page.wait_for_timeout(5000)
+            return True
     except Exception as exc:
         logging.warning("Không đổi được cấu hình GPU: %s", exc)
+    return False
 
 
 def close_pending_login(uid, pending_logins):
@@ -893,10 +901,16 @@ def provision_or_start_user_vps(
                     "⚠️ <b>Phiên đăng nhập Molab đã hết hạn.</b>\n"
                     "Hãy liên kết lại bằng lệnh: <code>/login email@gmail.com</code>",
                 )
-            dup_btn = page.locator("button[title='Duplicate notebook'], button:has-text('Duplicate')").first
+            dup_btn = page.locator(
+                "button[title='Duplicate notebook'], button:has-text('Duplicate'), button:has-text('Fork')"
+            ).first
+            if not dup_btn.count():
+                page.goto("https://molab.marimo.io/notebooks", wait_until="domcontentloaded", timeout=60000)
+                page.wait_for_timeout(5000)
+                dup_btn = page.locator("button:has-text('Create a notebook')").first
             if not dup_btn.count():
                 ctx.close()
-                return False, "❌ <b>Không tìm thấy nút Duplicate notebook trên Molab.</b>"
+                return False, "❌ <b>Không tìm thấy nút Fork / Duplicate / Create notebook trên Molab.</b>"
             old_url = page.url.split("?")[0]
             dup_btn.click()
             deadline = time.time() + 45
@@ -907,7 +921,7 @@ def provision_or_start_user_vps(
                     break
             else:
                 ctx.close()
-                return False, "❌ <b>Không tạo được notebook mới (quá thời gian Duplicate).</b>"
+                return False, "❌ <b>Không tạo được notebook mới (quá thời gian khởi tạo).</b>"
 
             u["notebook_url"] = page.url.split("?")[0]
             if uid == ADMIN_ID:
@@ -917,6 +931,7 @@ def provision_or_start_user_vps(
             page.wait_for_timeout(6000)
             take_over(page)
             ensure_gpu_compute(page)
+            take_over(page)
             if uid != ADMIN_ID:
                 cell_code = (ROOT / "molab_ssh_pinggy.py").read_text(encoding="utf-8")
                 cell_code = re.sub(r'TOKEN\s*=\s*"[^"]*"', 'TOKEN = ""', cell_code)
@@ -924,6 +939,7 @@ def provision_or_start_user_vps(
         else:
             page.goto(u["notebook_url"], wait_until="domcontentloaded", timeout=120000)
             page.wait_for_timeout(5000)
+            ensure_gpu_compute(page)
 
         result = ensure_running(page, force_rerun=need_provision)
         if not result:
