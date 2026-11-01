@@ -313,10 +313,10 @@ ADMIN_KEYBOARD = {
         ],
         [
             {"text": "🚀 App chạy ngầm", "callback_data": "/apps"},
-            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+            {"text": "🦅 Pterodactyl Wings", "callback_data": "/wings"},
         ],
         [
-            {"text": "🔄 Làm mới SSH", "callback_data": "/rotate"},
+            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
             {"text": "💾 Backup HF ngay", "callback_data": "/save"},
         ],
         [
@@ -324,8 +324,8 @@ ADMIN_KEYBOARD = {
             {"text": "📘 Hướng dẫn A-Z", "callback_data": "/guide"},
         ],
         [
+            {"text": "🔄 Làm mới SSH", "callback_data": "/rotate"},
             {"text": "♻️ Reset phiên 12h", "callback_data": "/restart"},
-            {"text": "📖 Bảng lệnh", "callback_data": "/help"},
         ],
     ]
 }
@@ -346,14 +346,14 @@ USER_KEYBOARD = {
         ],
         [
             {"text": "🚀 App chạy ngầm", "callback_data": "/apps"},
-            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+            {"text": "🦅 Pterodactyl Wings", "callback_data": "/wings"},
         ],
         [
-            {"text": "📘 Hướng dẫn A-Z", "callback_data": "/guide"},
+            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
             {"text": "💾 Backup HF ngay", "callback_data": "/save"},
         ],
         [
-            {"text": "♻️ Reset phiên 12h", "callback_data": "/restart"},
+            {"text": "📘 Hướng dẫn A-Z", "callback_data": "/guide"},
             {"text": "🛑 Tắt VPS", "callback_data": "/stopvps"},
         ],
     ]
@@ -410,9 +410,10 @@ def get_bot_help(is_admin=False):
         "• <code>/ssh</code> — Xem lệnh SSH & mật khẩu cố định của máy đang chọn\n"
         "• <code>/setpass &lt;mật_khẩu&gt;</code> — Đổi mật khẩu SSH cho máy đang chọn\n"
         "• <code>/setport &lt;cổng&gt;</code> — Đổi cổng SSH cố định (10000–60000)\n\n"
-        "🚀 <b>Deploy App chạy ngầm (Tự bật lại sau 12h)</b>\n"
+        "🚀 <b>Deploy App chạy ngầm & Pterodactyl Wings</b>\n"
         "• <code>/deploy python3 bot.py</code> — Chạy ngầm & tự sống lại sau 12h\n"
-        "• <code>/apps</code> | <code>/applog 1</code> | <code>/undep 1</code> — Quản lý App ngầm\n\n"
+        "• <code>/apps</code> | <code>/applog 1</code> | <code>/undep 1</code> — Quản lý App ngầm\n"
+        "• <code>/wings</code> — 🦅 Quản lý Docker Socket Shim & Pterodactyl Wings\n\n"
         "🔗 <b>Tài khoản & Hệ thống</b>\n"
         "• <code>/login email@gmail.com</code> | <code>/code 123456</code> — Liên kết Molab\n"
         "• <code>/status</code> | <code>/rotate</code> | <code>/restart</code> | <code>/save</code>\n"
@@ -706,6 +707,7 @@ def init_telegram_bot(cfg):
         {"command": "status", "description": "📊 Xem GPU, RAM, Disk & trạng thái VPS"},
         {"command": "deploy", "description": "🚀 Chạy ngầm & tự bật lại sau 12h: /deploy <lệnh>"},
         {"command": "apps", "description": "📋 Xem & quản lý các App đang chạy ngầm"},
+        {"command": "wings", "description": "🦅 Bật/quản lý Pterodactyl Wings + Docker Shim"},
         {"command": "undep", "description": "🗑 Dừng & xoá App chạy ngầm: /undep <số>"},
         {"command": "login", "description": "🔗 Liên kết acc Molab (Google): /login <email>"},
         {"command": "code", "description": "🔢 Nhập mã 6 số từ Gmail: /code <mã>"},
@@ -1595,6 +1597,57 @@ def format_apps_card(state, target_banner=""):
     return text, {"inline_keyboard": buttons}
 
 
+def format_wings_card(state, target_banner=""):
+    if not state or not state.get("last"):
+        return target_banner + "⚠️ <b>VPS chưa bật. Hãy bấm 🚀 Bật VPS hiện tại trước.</b>", None
+    try:
+        raw = ssh_exec(state["last"], "/usr/local/bin/save --wings status", timeout=30)
+        st = json.loads(raw.splitlines()[-1]) if raw else {}
+    except Exception as exc:
+        return target_banner + f"❌ <b>Lỗi đọc trạng thái Wings:</b> <code>{html.escape(str(exc))}</code>", None
+
+    d_str = "🟢 Đang chạy (<code>/var/run/docker.sock</code> — gVisor Bypass)" if st.get("docker_active") else "🔴 Chưa bật"
+    if st.get("wings_active"):
+        w_str = f"🟢 Đang chạy ({html.escape(st.get('wings_version') or 'wings')})"
+    elif st.get("wings_installed"):
+        w_str = f"🟡 Đã cài ({html.escape(st.get('wings_version') or 'wings')}) — Chờ cấu hình Panel"
+    else:
+        w_str = "⚪ Chưa cài đặt (Option tuỳ chọn ~45MB)"
+    c_str = "✅ Đã có (Tự giữ lại sau 12h)" if st.get("wings_configured") else "⚪ Chưa có <code>/etc/pterodactyl/config.yml</code>"
+
+    buttons = []
+    if not st.get("wings_installed"):
+        buttons.append([{"text": "📥 Cài đặt & Bật Pterodactyl Wings", "callback_data": "/wings install"}])
+    else:
+        buttons.append(
+            [
+                {"text": "🔄 Khởi động lại Wings", "callback_data": "/wings restart"},
+                {"text": "📜 Xem Log Wings", "callback_data": "/wings log"},
+            ]
+        )
+        buttons.append([{"text": "🗑 Gỡ cài đặt Wings (Giải phóng 45MB)", "callback_data": "/wings remove"}])
+    buttons.append([{"text": "🔄 Làm mới", "callback_data": "/wings"}, {"text": "🔙 Bảng chính", "callback_data": "/help"}])
+
+    text = (
+        target_banner
+        + "🦅 <b>PTERODACTYL WINGS & DOCKER SOCKET SHIM (CÁCH 1)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🐳 <b>Docker API Shim:</b> {d_str}\n"
+        f"🦅 <b>Pterodactyl Wings:</b> {w_str}\n"
+        f"⚙️ <b>File cấu hình:</b> {c_str}\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "💡 <b>Cách hoạt động trên nhân gVisor của Molab:</b>\n"
+        "• <b>Docker Shim (<code>molab-dockerd</code>)</b> cực nhẹ (~8KB) luôn được tích hợp sẵn, giả lập <code>/var/run/docker.sock</code> để chuyển mọi container của Wings thành tiến trình chạy thẳng trên máy chủ (ăn trọn 100% CPU + GPU <code>RTX Pro 6000</code>).\n"
+        "• <b>Binary Wings (~45MB)</b> được tách làm <b>Option tuỳ chọn</b>: chỉ tải về khi bạn bấm nút cài đặt bên dưới.\n\n"
+        "🔗 <b>Cách nối vào Pterodactyl Panel:</b>\n"
+        "1️⃣ Bấm <b>📥 Cài đặt & Bật Pterodactyl Wings</b>\n"
+        "2️⃣ Copy lệnh Auto-Deploy từ mục Node trên Panel rồi gửi vào đây:\n"
+        "<code>/wings configure --panel-url https://... --token ptla_... --node 1</code>\n"
+        "<i>(Hoặc chỉnh trực tiếp <code>/etc/pterodactyl/config.yml</code> trong SSH, hệ thống tự động lưu sang <code>/home/marimo/.pterodactyl/config.yml</code> và tự bật lại sau mỗi 12h!)</i>"
+    )
+    return text, {"inline_keyboard": buttons}
+
+
 def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, admin_state):
     global TG_OFFSET
     if not cfg.get("telegram_bot_token"):
@@ -2054,6 +2107,92 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
         elif cmd == "/apps":
             card_text, markup = format_apps_card(state, target_banner=target_banner)
             send_telegram(cfg, card_text, chat_id=chat_id, reply_markup=markup)
+        elif cmd == "/wings":
+            if not state or not state.get("last"):
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật. Hãy bấm 🚀 Bật VPS hiện tại trước.</b>", chat_id=chat_id)
+                continue
+            sub = arg.strip()
+            if not sub:
+                card_text, markup = format_wings_card(state, target_banner=target_banner)
+                send_telegram(cfg, card_text, chat_id=chat_id, reply_markup=markup)
+                continue
+            sub_word = sub.split()[0].lower()
+            if sub_word == "install":
+                send_telegram(
+                    cfg,
+                    target_banner + "⏳ <b>Đang tải & cài đặt Pterodactyl Wings + kích hoạt Docker Socket Shim...</b>",
+                    chat_id=chat_id,
+                    menu=False,
+                )
+                out = ssh_exec(state["last"], "/usr/local/bin/save --wings install", timeout=180)
+                card_text, markup = format_wings_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"🦅 <b>{html.escape(out or 'Đã cài đặt Wings!')}</b>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                    effect_id=EFFECT_PARTY,
+                )
+            elif sub_word in ("remove", "uninstall", "off"):
+                out = ssh_exec(state["last"], "/usr/local/bin/save --wings remove", timeout=120)
+                card_text, markup = format_wings_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"🗑 <b>{html.escape(out or 'Đã gỡ cài đặt Wings.')}</b>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
+            elif sub_word == "restart":
+                out = ssh_exec(state["last"], "/usr/local/bin/save --wings restart", timeout=90)
+                card_text, markup = format_wings_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"🔄 <b>{html.escape(out or 'Đã khởi động lại Wings.')}</b>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
+            elif sub_word == "log":
+                out = ssh_exec(
+                    state["last"],
+                    "tail -n 35 /home/marimo/.logs/wings.log 2>/dev/null || echo '(Chưa có log Wings)'",
+                    timeout=30,
+                )
+                markup = {
+                    "inline_keyboard": [
+                        [
+                            {"text": "🔄 Làm mới Log", "callback_data": "/wings log"},
+                            {"text": "🔄 Restart Wings", "callback_data": "/wings restart"},
+                        ],
+                        [{"text": "🔙 Quản lý Wings", "callback_data": "/wings"}],
+                    ]
+                }
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + "📜 <b>LOG PTERODACTYL WINGS</b> (<code>/home/marimo/.logs/wings.log</code>)\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<pre>{html.escape((out or '(Trống)')[-3200:])}</pre>",
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
+            else:
+                import shlex
+
+                cfg_arg = sub[len("configure") :].strip() if sub_word == "configure" else sub
+                send_telegram(
+                    cfg,
+                    target_banner + "⏳ <b>Đang chạy cấu hình Pterodactyl Wings & lưu vào Hugging Face...</b>",
+                    chat_id=chat_id,
+                    menu=False,
+                )
+                out = ssh_exec(state["last"], f"/usr/local/bin/save --wings configure {shlex.quote(cfg_arg)}", timeout=180)
+                card_text, markup = format_wings_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"⚙️ <b>KẾT QUẢ CẤU HÌNH WINGS:</b>\n<pre>{html.escape((out or '')[-1000:])}</pre>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
         elif cmd in ("/deploy", "/autostart"):
             if not state:
                 send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
