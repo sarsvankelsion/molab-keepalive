@@ -182,12 +182,13 @@ def run_cell(page, timeout=420):
     page.wait_for_timeout(5000)  # đợi output cũ (nếu có) render xong qua WebSocket
     take_over(page)
     before = scrape(page)
+    editor.click(position={"x": 80, "y": 20})
+    page.wait_for_timeout(300)
     frame = editor_frame(page)
     run_btn = frame.get_by_test_id("run-button") if frame else None
-    if run_btn and run_btn.count():
-        run_btn.first.click()
+    if run_btn and run_btn.count() and run_btn.first.is_visible():
+        run_btn.first.click(timeout=5000)
     else:
-        editor.click(position={"x": 80, "y": 20})
         page.keyboard.press("Shift+Enter")
     page.wait_for_timeout(4000)
     started = time.time()
@@ -260,6 +261,10 @@ def ensure_running(page, timeout=420, attempts=3, force_rerun=False):
 ADMIN_ID = "7521313803"
 TG_OFFSET = 0
 
+EFFECT_FIRE = "5104841245755180586"
+EFFECT_PARTY = "5046509860389126442"
+EFFECT_LIKE = "5107584321108051014"
+
 ADMIN_KEYBOARD = {
     "inline_keyboard": [
         [
@@ -267,15 +272,15 @@ ADMIN_KEYBOARD = {
             {"text": "📊 Cấu hình & GPU", "callback_data": "/status"},
         ],
         [
+            {"text": "🚀 App chạy ngầm", "callback_data": "/apps"},
+            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+        ],
+        [
             {"text": "🔄 Đổi cổng SSH", "callback_data": "/rotate"},
             {"text": "💾 Backup HF ngay", "callback_data": "/save"},
         ],
         [
-            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
             {"text": "🖥 Quản lý VPS User", "callback_data": "/vps"},
-        ],
-        [
-            {"text": "🚀 Tạo VPS mới", "callback_data": "/newvps"},
             {"text": "👥 Quản lý ID", "callback_data": "/ids"},
         ],
         [
@@ -296,16 +301,16 @@ USER_KEYBOARD = {
             {"text": "📊 Cấu hình & GPU", "callback_data": "/status"},
         ],
         [
+            {"text": "🚀 App chạy ngầm", "callback_data": "/apps"},
+            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+        ],
+        [
             {"text": "🔄 Đổi cổng SSH", "callback_data": "/rotate"},
             {"text": "💾 Backup HF ngay", "callback_data": "/save"},
         ],
         [
-            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
             {"text": "♻️ Reset phiên 12h", "callback_data": "/restart"},
-        ],
-        [
             {"text": "🛑 Tắt VPS", "callback_data": "/stopvps"},
-            {"text": "📖 Bảng lệnh", "callback_data": "/help"},
         ],
     ]
 }
@@ -317,32 +322,25 @@ def get_bot_help(is_admin=False):
     base = (
         "⚡ <b>MOLAB CLOUD VPS — BẢNG ĐIỀU KHIỂN</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "🚀 <b>Deploy App chạy ngầm (Tự bật lại sau 12h)</b>\n"
+        "• <code>/deploy python3 bot.py</code> — Chạy ngầm & tự sống lại sau 12h\n"
+        "• <code>/apps</code> — Xem danh sách app đang chạy, xem log & quản lý\n"
+        "• <code>/undep 1</code> — Dừng & xoá app số #1\n"
+        "• <i>(Trong SSH cũng gõ được thẳng: <code>deploy python3 bot.py</code>)</i>\n\n"
         "🔗 <b>Tài khoản & Khởi tạo VPS riêng</b>\n"
         "• <code>/login email@gmail.com</code> — Liên kết tài khoản Molab (Google)\n"
         "• <code>/code 123456</code> — Nhập mã 6 số gửi về Gmail\n"
-        "• <code>/cookie &lt;__client&gt;</code> — Liên kết nhanh bằng cookie phiên\n"
-        "• <code>/newvps</code> — Tự động tạo & bật VPS GPU RTX Pro 6000 riêng\n"
-        "• <code>/stopvps</code> — Tạm tắt VPS của bạn\n\n"
-        "🖥 <b>Kết nối & Phiên</b>\n"
-        "• <code>/ssh</code> — Lấy lệnh SSH, mật khẩu & trạng thái\n"
-        "• <code>/status</code> — Xem GPU, VRAM, RAM, ổ cứng & Uptime\n"
-        "• <code>/rotate</code> — Đổi cổng & mật khẩu SSH mới ngay\n"
-        "• <code>/restart</code> — Lưu dữ liệu & tạo phiên 12h mới\n\n"
-        "💾 <b>Lưu trữ & Gói cài đặt</b>\n"
-        "• <code>/save</code> — Đồng bộ ngay lên Hugging Face\n"
-        "• <code>/pkgs</code> — Xem các gói <code>apt</code> / <code>pip</code> tự cài\n"
-        "• <code>/addpkg apt tên_gói</code> — Cài & nhớ gói mới\n"
-        "• <code>/delpkg tên_gói</code> — Xoá gói khỏi danh sách nhớ\n"
-        "• <code>/sh lệnh</code> — Chạy lệnh trực tiếp trên VPS\n"
+        "• <code>/newvps</code> | <code>/stopvps</code> — Tạo/bật hoặc tắt VPS GPU riêng\n\n"
+        "🖥 <b>Kết nối, Gói & Hệ thống</b>\n"
+        "• <code>/ssh</code> | <code>/status</code> | <code>/rotate</code> | <code>/restart</code>\n"
+        "• <code>/save</code> | <code>/pkgs</code> | <code>/addpkg apt tên</code> | <code>/sh lệnh</code>\n"
     )
     if is_admin:
         base += (
             "\n👑 <b>Quyền Quản trị viên (Admin)</b>\n"
             "• <code>/vps</code> — Xem & điều khiển toàn bộ VPS của mọi ID\n"
             "• <code>/use &lt;id&gt;</code> — Chuyển quyền điều khiển sang VPS của ID\n"
-            "• <code>/newvps &lt;id&gt;</code> | <code>/stopvps &lt;id&gt;</code> — Tạo/tắt VPS cho ID\n"
             "• <code>/ids</code> | <code>/addid &lt;id&gt;</code> | <code>/delid &lt;id&gt;</code> — Phân quyền ID\n"
-            "• <code>/set 55 725</code> — Chỉnh chu kỳ xoay (phút)\n"
         )
     return (
         base
@@ -416,7 +414,24 @@ def tg_api(cfg, method, payload=None, timeout=10):
         return None
 
 
-def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True, reply_markup=None):
+def react_telegram(cfg, chat_id, message_id, emoji="⚡"):
+    if not chat_id or not message_id:
+        return
+    tg_api(
+        cfg,
+        "setMessageReaction",
+        {
+            "chat_id": str(chat_id),
+            "message_id": int(message_id),
+            "reaction": json.dumps([{"type": "emoji", "emoji": emoji}]),
+            "is_big": "true",
+        },
+        timeout=4,
+    )
+    tg_api(cfg, "sendChatAction", {"chat_id": str(chat_id), "action": "typing"}, timeout=4)
+
+
+def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True, reply_markup=None, effect_id=None):
     targets = [str(chat_id)] if chat_id else [ADMIN_ID]
     for target in targets:
         payload = {
@@ -426,6 +441,8 @@ def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True, reply_mark
         }
         if html_mode:
             payload["parse_mode"] = "HTML"
+        if effect_id:
+            payload["message_effect_id"] = str(effect_id)
         if reply_markup is not None:
             payload["reply_markup"] = json.dumps(reply_markup)
         elif menu:
@@ -470,7 +487,10 @@ def init_telegram_bot(cfg):
     commands = [
         {"command": "ssh", "description": "🔑 Lấy lệnh SSH & mật khẩu (copy 1 chạm)"},
         {"command": "status", "description": "📊 Xem GPU, RAM, Disk & trạng thái VPS"},
-        {"command": "newvps", "description": "🚀 Tạo / khởi động VPS GPU riêng"},
+        {"command": "deploy", "description": "🚀 Chạy ngầm & tự bật lại sau 12h: /deploy <lệnh>"},
+        {"command": "apps", "description": "📋 Xem & quản lý các App đang chạy ngầm"},
+        {"command": "undep", "description": "🗑 Dừng & xoá App chạy ngầm: /undep <số>"},
+        {"command": "newvps", "description": "🖥 Tạo / khởi động VPS GPU riêng"},
         {"command": "login", "description": "🔗 Liên kết acc Molab (Google): /login <email>"},
         {"command": "code", "description": "🔢 Nhập mã 6 số từ Gmail: /code <mã>"},
         {"command": "rotate", "description": "🔄 Đổi cổng & mật khẩu SSH mới ngay"},
@@ -479,7 +499,7 @@ def init_telegram_bot(cfg):
         {"command": "addpkg", "description": "➕ Cài & lưu gói: /addpkg <apt|pip> <tên>"},
         {"command": "delpkg", "description": "➖ Xoá gói tự cài: /delpkg <tên>"},
         {"command": "sh", "description": "💻 Chạy lệnh bash: /sh <lệnh>"},
-        {"command": "vps", "description": "🖥 (Admin) Quản lý toàn bộ VPS các User"},
+        {"command": "vps", "description": "👑 (Admin) Quản lý toàn bộ VPS các User"},
         {"command": "use", "description": "🎯 (Admin) Chọn VPS cần điều khiển: /use <id>"},
         {"command": "ids", "description": "👥 (Admin) Xem danh sách ID có quyền"},
         {"command": "addid", "description": "👤 (Admin) Cấp quyền ID mới: /addid <id>"},
@@ -564,9 +584,9 @@ def publish(cfg, result, state=None, uid=ADMIN_ID, notify_chat_id=None):
     tmp.replace(path)
     logging.info("Địa chỉ mới [%s]:\n%s", uid, text.strip())
     card = format_ssh_card(cfg, result, state, uid=uid)
-    send_telegram(cfg, card, chat_id=uid)
+    send_telegram(cfg, card, chat_id=uid, effect_id=EFFECT_FIRE)
     if notify_chat_id and str(notify_chat_id) != str(uid):
-        send_telegram(cfg, card, chat_id=notify_chat_id)
+        send_telegram(cfg, card, chat_id=notify_chat_id, effect_id=EFFECT_FIRE)
     sync_remote(cfg, result, mode="--start-daemon", uid=uid)
 
 
@@ -1013,6 +1033,69 @@ def format_all_vps_card(cfg, active_sessions, admin_target):
     return text, {"inline_keyboard": buttons}
 
 
+def format_apps_card(state, target_banner=""):
+    if not state or not state.get("last"):
+        return target_banner + "⚠️ <b>VPS chưa bật. Hãy bấm 🚀 Tạo / Bật VPS trước.</b>", None
+    probe_py = (
+        "import json, os, subprocess\n"
+        "p = '/home/marimo/.packages.json'\n"
+        "d = json.load(open(p)) if os.path.exists(p) else {}\n"
+        "apps = d.get('apps') or []\n"
+        "out = []\n"
+        "for i, c in enumerate(apps, 1):\n"
+        "    rc = subprocess.call(['systemctl', 'is-active', '--quiet', f'molab-app-{i}.service'])\n"
+        "    out.append({'idx': i, 'cmd': c, 'active': rc == 0})\n"
+        "print(json.dumps(out))\n"
+    )
+    try:
+        raw = ssh_exec(state["last"], f"python3 -c {json.dumps(probe_py)}", timeout=25)
+        items = json.loads(raw.splitlines()[-1]) if raw else []
+    except Exception as exc:
+        return target_banner + f"❌ <b>Lỗi đọc danh sách App:</b> <code>{html.escape(str(exc))}</code>", None
+
+    if not items:
+        text = (
+            target_banner
+            + "🚀 <b>APP CHẠY NGẦM (TỰ ĐỘNG BẬT LẠI SAU 12H)</b>\n"
+            "━━━━━━━━━━━━━━━━━━━━━━\n"
+            "<i>Hiện chưa có app nào được deploy.</i>\n\n"
+            "💡 <b>Cách dùng cực kỳ đơn giản:</b>\n"
+            "• Trên Telegram: gõ <code>/deploy python3 bot.py</code>\n"
+            "• Hoặc trong SSH: gõ <code>deploy python3 bot.py</code>\n\n"
+            "👉 Hệ thống sẽ tự tạo service chạy ngầm trong <code>/home/marimo</code>, tự bật lại nếu crash, và <b>tự động chạy lại mỗi khi VPS reset 12h!</b>"
+        )
+        return text, None
+
+    rows = []
+    buttons = []
+    for it in items:
+        i = it["idx"]
+        st_icon = "🟢 Đang chạy" if it["active"] else "🔴 Đã dừng"
+        rows.append(
+            f"<b>#{i}</b> {st_icon}\n"
+            f"   💻 <code>{html.escape(it['cmd'])}</code>\n"
+            f"   📄 Log: <code>/home/marimo/.logs/app-{i}.log</code>"
+        )
+        buttons.append(
+            [
+                {"text": f"📜 Log #{i}", "callback_data": f"/applog {i}"},
+                {"text": f"🔄 Khởi động lại #{i}", "callback_data": f"/reapp {i}"},
+                {"text": f"🗑 Xoá #{i}", "callback_data": f"/undep {i}"},
+            ]
+        )
+    buttons.append([{"text": "🔄 Làm mới trạng thái", "callback_data": "/apps"}, {"text": "🔙 Bảng chính", "callback_data": "/help"}])
+    text = (
+        target_banner
+        + "🚀 <b>DANH SÁCH APP CHẠY NGẦM (TỰ SỐNG LẠI SAU 12H)</b>\n"
+        "━━━━━━━━━━━━━━━━━━━━━━\n"
+        + "\n\n".join(rows)
+        + "\n━━━━━━━━━━━━━━━━━━━━━━\n"
+        "➕ <b>Thêm app mới:</b> <code>/deploy &lt;lệnh_chạy&gt;</code>\n"
+        "💡 <i>Bấm các nút bên dưới để xem log, khởi động lại hoặc xoá nhanh:</i>"
+    )
+    return text, {"inline_keyboard": buttons}
+
+
 def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, admin_state):
     global TG_OFFSET
     if not cfg.get("telegram_bot_token"):
@@ -1060,6 +1143,9 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
         parts = text.split(maxsplit=1)
         cmd = parts[0].split("@")[0].lower()
         arg = parts[1].strip() if len(parts) > 1 else ""
+        msg_id = msg.get("message_id")
+        if msg_id and not cb:
+            react_telegram(cfg, chat_id, msg_id, "🔥" if cmd in ("/deploy", "/newvps", "/restart") else "⚡")
 
         if cmd in ("/start", "/help"):
             send_telegram(cfg, target_banner + get_bot_help(is_admin=is_admin), chat_id=chat_id)
@@ -1259,6 +1345,105 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
                 )
             except Exception as exc:
                 send_telegram(cfg, target_banner + f"❌ <b>Lỗi thực thi:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+        elif cmd == "/apps":
+            card_text, markup = format_apps_card(state, target_banner=target_banner)
+            send_telegram(cfg, card_text, chat_id=chat_id, reply_markup=markup)
+        elif cmd in ("/deploy", "/autostart"):
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
+            if not arg:
+                card_text, markup = format_apps_card(state, target_banner=target_banner)
+                send_telegram(cfg, card_text, chat_id=chat_id, reply_markup=markup)
+                continue
+            send_telegram(
+                cfg,
+                target_banner + f"⏳ <b>Đang deploy chạy ngầm & lưu tự động bật lại sau 12h:</b>\n<code>{html.escape(arg)}</code>...",
+                chat_id=chat_id,
+                menu=False,
+            )
+            try:
+                import shlex
+
+                out = ssh_exec(state["last"], f"/usr/local/bin/save --deploy {shlex.quote(arg)}", timeout=180)
+                card_text, markup = format_apps_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"🎉 <b>DEPLOY THÀNH CÔNG!</b>\n<code>{html.escape(out or arg)}</code>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                    effect_id=EFFECT_PARTY,
+                )
+            except Exception as exc:
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi deploy:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+        elif cmd == "/undep":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
+            idx = arg.strip()
+            if not idx.isdigit():
+                send_telegram(cfg, target_banner + "🗑 <b>Cách dùng:</b> <code>/undep &lt;số_thứ_tự_app&gt;</code> (ví dụ: <code>/undep 1</code>)", chat_id=chat_id)
+                continue
+            try:
+                out = ssh_exec(state["last"], f"/usr/local/bin/save --deploy --del {idx}", timeout=180)
+                card_text, markup = format_apps_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"🗑 <b>{html.escape(out or f'Đã xoá app #{idx}')}</b>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
+            except Exception as exc:
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi xoá app:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+        elif cmd == "/reapp":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
+            idx = arg.strip()
+            if not idx.isdigit():
+                send_telegram(cfg, target_banner + "🔄 <b>Cách dùng:</b> <code>/reapp &lt;số_thứ_tự_app&gt;</code>", chat_id=chat_id)
+                continue
+            try:
+                out = ssh_exec(state["last"], f"/usr/local/bin/save --deploy --restart {idx}", timeout=60)
+                card_text, markup = format_apps_card(state, target_banner=target_banner)
+                send_telegram(
+                    cfg,
+                    f"🔄 <b>{html.escape(out or f'Đã khởi động lại app #{idx}')}</b>\n\n" + card_text,
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
+            except Exception as exc:
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi khởi động lại app:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
+        elif cmd == "/applog":
+            if not state:
+                send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
+                continue
+            idx = arg.strip()
+            if not idx.isdigit():
+                send_telegram(cfg, target_banner + "📜 <b>Cách dùng:</b> <code>/applog &lt;số_thứ_tự_app&gt;</code>", chat_id=chat_id)
+                continue
+            try:
+                out = ssh_exec(state["last"], f"tail -n 35 /home/marimo/.logs/app-{idx}.log 2>/dev/null || echo '(Chưa có log)'", timeout=30)
+                markup = {
+                    "inline_keyboard": [
+                        [
+                            {"text": f"🔄 Làm mới Log #{idx}", "callback_data": f"/applog {idx}"},
+                            {"text": f"🔄 Restart #{idx}", "callback_data": f"/reapp {idx}"},
+                        ],
+                        [{"text": "🔙 Danh sách App", "callback_data": "/apps"}],
+                    ]
+                }
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + f"📜 <b>LOG APP #{idx}</b> (<code>/home/marimo/.logs/app-{idx}.log</code>)\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"<pre>{html.escape((out or '(Trống)')[-3200:])}</pre>",
+                    chat_id=chat_id,
+                    reply_markup=markup,
+                )
+            except Exception as exc:
+                send_telegram(cfg, target_banner + f"❌ <b>Lỗi đọc log:</b> <code>{html.escape(str(exc))}</code>", chat_id=chat_id)
         elif cmd == "/pkgs":
             if not state:
                 send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
