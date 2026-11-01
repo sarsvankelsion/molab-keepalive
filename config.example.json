@@ -1,0 +1,12 @@
+{
+  "notebook_url": "https://molab.marimo.io/notebooks/nb_XXXXXXXX",
+  "profile_dir": "profile",
+  "headless": true,
+  "session_restart_minutes": 725,
+  "cell_rerun_minutes": 55,
+  "output_file": "last_ssh.txt",
+  "telegram_bot_token": "",
+  "telegram_chat_id": "",
+  "hf_token": "",
+  "hf_repo": ""
+}
