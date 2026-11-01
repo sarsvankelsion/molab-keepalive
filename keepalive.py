@@ -22,6 +22,7 @@ import logging
 import re
 import socket
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -89,6 +90,21 @@ def scrape(page):
     return ssh_line, passwords[-1]
 
 
+def get_editor_code(editor):
+    try:
+        return (
+            editor.evaluate(
+                """el => {
+                    const v = (el.cmTile && el.cmTile.view) || (el.cmView && el.cmView.view);
+                    return v ? v.state.doc.toString() : (el.innerText || "");
+                }"""
+            )
+            or ""
+        )
+    except Exception:
+        return ""
+
+
 def find_ssh_cell(page):
     fallback = None
     for frame in page.frames:
@@ -98,7 +114,8 @@ def find_ssh_cell(page):
             fallback = editors.first
         for index in range(count):
             try:
-                if "import pinggy" in editors.nth(index).inner_text(timeout=1500):
+                txt = get_editor_code(editors.nth(index))
+                if "_start_pinggy_subprocess" in txt or "import pinggy" in txt or "LOCAL_PORT" in txt:
                     return editors.nth(index)
             except Exception:
                 continue
@@ -121,7 +138,12 @@ def wait_editor_frame(page, timeout=180):
     while time.time() < deadline:
         frame = editor_frame(page)
         if frame is not None:
-            return frame
+            try:
+                head = frame.inner_text("body", timeout=2000)[:120]
+                if "Connecting" not in head:
+                    return frame
+            except Exception:
+                return frame
         page.wait_for_timeout(2000)  # molab đang "Scheduling sandbox..."
     return None
 
@@ -182,29 +204,43 @@ def run_cell(page, timeout=420):
     page.wait_for_timeout(5000)  # đợi output cũ (nếu có) render xong qua WebSocket
     take_over(page)
     before = scrape(page)
-    editor.click(position={"x": 80, "y": 20})
-    page.wait_for_timeout(300)
+    before_alive = tunnel_alive(before)
     frame = editor_frame(page)
     run_btn = frame.get_by_test_id("run-button") if frame else None
-    if run_btn and run_btn.count() and run_btn.first.is_visible():
-        run_btn.first.click(timeout=5000)
-    else:
+    clicked_btn = False
+    if run_btn and run_btn.count():
+        try:
+            run_btn.first.click(force=True, timeout=5000)
+            clicked_btn = True
+        except Exception:
+            clicked_btn = False
+    if not clicked_btn:
+        editor.click(position={"x": 80, "y": 20})
+        page.wait_for_timeout(300)
         page.keyboard.press("Shift+Enter")
-    page.wait_for_timeout(4000)
+    page.wait_for_timeout(6000)
     started = time.time()
     while time.time() < deadline:
         page.wait_for_timeout(2000)
         result = scrape(page)
-        if result and result != before:
-            return result
+        if result:
+            if result != before and tunnel_alive(result):
+                return result
+            if (
+                result == before
+                and "bore.pub" in result[0]
+                and (not before_alive or time.time() - started >= 8)
+                and tunnel_alive(result)
+            ):
+                return result
         if time.time() - started > 70:
             text = visible_text(page)
             if (
                 "IndexError" in text
                 or "Tunnel failed to start" in text
-                or "Không tạo được tunnel" in text
+                or "RuntimeError:" in text
             ):
-                logging.warning("Pinggy từ chối tunnel, chạy lại cell")
+                logging.warning("Tunnel lỗi, chạy lại cell")
                 return None
     return None
 
@@ -322,6 +358,10 @@ def get_bot_help(is_admin=False):
     base = (
         "⚡ <b>MOLAB CLOUD VPS — BẢNG ĐIỀU KHIỂN</b>\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
+        "📌 <b>SSH Cố Định Vĩnh Viễn (bore.pub)</b>\n"
+        "• <code>/ssh</code> — Xem lệnh SSH & mật khẩu cố định\n"
+        "• <code>/setpass &lt;mật_khẩu&gt;</code> — Đặt mật khẩu SSH cố định theo ý muốn\n"
+        "• <code>/setport &lt;cổng&gt;</code> — Đổi cổng SSH cố định (10000–60000)\n\n"
         "🚀 <b>Deploy App chạy ngầm (Tự bật lại sau 12h)</b>\n"
         "• <code>/deploy python3 bot.py</code> — Chạy ngầm & tự sống lại sau 12h\n"
         "• <code>/apps</code> — Xem danh sách app đang chạy, xem log & quản lý\n"
@@ -331,9 +371,9 @@ def get_bot_help(is_admin=False):
         "• <code>/login email@gmail.com</code> — Liên kết tài khoản Molab (Google)\n"
         "• <code>/code 123456</code> — Nhập mã 6 số gửi về Gmail\n"
         "• <code>/newvps</code> | <code>/stopvps</code> — Tạo/bật hoặc tắt VPS GPU riêng\n\n"
-        "🖥 <b>Kết nối, Gói & Hệ thống</b>\n"
-        "• <code>/ssh</code> | <code>/status</code> | <code>/rotate</code> | <code>/restart</code>\n"
-        "• <code>/save</code> | <code>/pkgs</code> | <code>/addpkg apt tên</code> | <code>/sh lệnh</code>\n"
+        "🖥 <b>Hệ thống & Gói cài đặt</b>\n"
+        "• <code>/status</code> | <code>/rotate</code> | <code>/restart</code> | <code>/save</code>\n"
+        "• <code>/pkgs</code> | <code>/addpkg apt tên</code> | <code>/sh lệnh</code>\n"
     )
     if is_admin:
         base += (
@@ -355,33 +395,52 @@ def save_config(cfg):
     )
 
 
-def get_user_cfg(cfg, uid):
+def _default_port_for_uid(uid):
     uid = str(uid).strip()
     if uid == ADMIN_ID:
-        return {
-            "profile_dir": cfg["profile_dir"],
-            "notebook_url": cfg["notebook_url"],
-            "hf_repo": cfg.get("hf_repo", ""),
-            "output_file": cfg["output_file"],
-            "logged_in": True,
-            "email": "Admin (mặc định)",
-        }
+        return 43803
+    digits = re.sub(r"\D", "", uid)
+    return 25000 + (int(digits) % 35000) if digits else 43803
+
+
+def get_user_cfg(cfg, uid):
+    uid = str(uid).strip()
     users = cfg.setdefault("users", {})
     base_hf = cfg.get("hf_repo") or "lesslosster/molab-backup"
     u = users.setdefault(uid, {})
     changed = False
-    defaults = {
-        "profile_dir": f"profiles/{uid}",
-        "notebook_url": "",
-        "hf_repo": f"{base_hf}-{uid}",
-        "output_file": f"last_ssh_{uid}.txt",
-        "logged_in": False,
-        "email": "",
-    }
+    if uid == ADMIN_ID:
+        defaults = {
+            "profile_dir": cfg["profile_dir"],
+            "notebook_url": cfg["notebook_url"],
+            "hf_repo": base_hf,
+            "output_file": cfg["output_file"],
+            "logged_in": True,
+            "email": "Admin (mặc định)",
+            "static_port": 43803,
+            "static_password": "molab" + ADMIN_ID[-4:],
+        }
+    else:
+        defaults = {
+            "profile_dir": f"profiles/{uid}",
+            "notebook_url": "",
+            "hf_repo": f"{base_hf}-{uid}",
+            "output_file": f"last_ssh_{uid}.txt",
+            "logged_in": False,
+            "email": "",
+            "static_port": _default_port_for_uid(uid),
+            "static_password": "molab" + (re.sub(r"\D", "", uid)[-4:] or "6000"),
+        }
     for k, v in defaults.items():
-        if k not in u:
+        if k not in u or u[k] == "":
             u[k] = v
             changed = True
+    if uid == ADMIN_ID:
+        u["profile_dir"] = cfg["profile_dir"]
+        u["notebook_url"] = cfg["notebook_url"]
+        u["hf_repo"] = base_hf
+        u["output_file"] = cfg["output_file"]
+        u["logged_in"] = True
     if changed:
         save_config(cfg)
     return u
@@ -451,17 +510,20 @@ def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True, reply_mark
         tg_api(cfg, "sendMessage", payload)
 
 
-def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, title="🔑 <b>THÔNG TIN KẾT NỐI SSH</b>"):
+def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, title="🔑 <b>THÔNG TIN KẾT NỐI SSH CỐ ĐỊNH</b>"):
     u = get_user_cfg(cfg, uid)
     if not result:
         return f"{title}\n━━━━━━━━━━━━━━━━━━━━━━\n⚠️ <b>VPS của ID <code>{html.escape(str(uid))}</code> chưa có kết nối SSH.</b>"
     ssh_line, password = result
-    alive = "🟢 Đang hoạt động" if tunnel_alive(result) else "🔴 Mất kết nối"
+    alive = "🟢 Đang hoạt động (Cố định 24/7)" if "bore.pub" in ssh_line and tunnel_alive(result) else ("🟢 Đang hoạt động" if tunnel_alive(result) else "🔴 Mất kết nối")
     timers = ""
     if state:
-        rem_ssh = max(0, int((state["next_rerun"] - time.monotonic()) // 60))
         rem_ses = max(0, int((state["next_restart"] - time.monotonic()) // 60))
-        timers = f"⏱ <b>Đổi cổng sau:</b> {rem_ssh} phút  |  <b>Reset phiên:</b> {rem_ses} phút\n"
+        if "bore.pub" in ssh_line:
+            timers = f"📌 <b>Địa chỉ & Mật khẩu:</b> Cố định vĩnh viễn  |  <b>Reset phiên:</b> {rem_ses} phút\n"
+        else:
+            rem_ssh = max(0, int((state["next_rerun"] - time.monotonic()) // 60))
+            timers = f"⏱ <b>Đổi cổng sau:</b> {rem_ssh} phút  |  <b>Reset phiên:</b> {rem_ses} phút\n"
     repo = u.get("hf_repo") or "chưa cấu hình"
     owner_line = f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code> ({html.escape(u.get('email') or 'Chưa rõ')})\n"
     return (
@@ -472,10 +534,11 @@ def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, title="🔑 <b>THÔNG
         f"🕒 <b>Cập nhật:</b> <code>{time.strftime('%H:%M:%S — %d/%m/%Y')}</code>\n"
         f"{timers}"
         f"☁️ <b>Backup HF:</b> <code>{html.escape(repo)}</code>\n\n"
-        "🖥 <b>Lệnh SSH</b> <i>(chạm để copy)</i>:\n"
+        "🖥 <b>Lệnh SSH cố định</b> <i>(chạm để copy)</i>:\n"
         f"<code>{html.escape(ssh_line)}</code>\n\n"
-        "🔐 <b>Mật khẩu</b> <i>(chạm để copy)</i>:\n"
-        f"<code>{html.escape(password)}</code>"
+        "🔐 <b>Mật khẩu cố định</b> <i>(chạm để copy)</i>:\n"
+        f"<code>{html.escape(password)}</code>\n\n"
+        "💡 <i>Đổi mật khẩu cố định: <code>/setpass &lt;mật_khẩu&gt;</code> | Đổi cổng: <code>/setport &lt;cổng&gt;</code></i>"
     )
 
 
@@ -485,7 +548,9 @@ def init_telegram_bot(cfg):
         return
     get_allowed_ids(cfg)
     commands = [
-        {"command": "ssh", "description": "🔑 Lấy lệnh SSH & mật khẩu (copy 1 chạm)"},
+        {"command": "ssh", "description": "🔑 Lấy lệnh SSH & mật khẩu cố định (copy 1 chạm)"},
+        {"command": "setpass", "description": "🔐 Đặt mật khẩu SSH cố định: /setpass <mật_khẩu>"},
+        {"command": "setport", "description": "📌 Đổi cổng SSH cố định: /setport <10000-60000>"},
         {"command": "status", "description": "📊 Xem GPU, RAM, Disk & trạng thái VPS"},
         {"command": "deploy", "description": "🚀 Chạy ngầm & tự bật lại sau 12h: /deploy <lệnh>"},
         {"command": "apps", "description": "📋 Xem & quản lý các App đang chạy ngầm"},
@@ -493,7 +558,7 @@ def init_telegram_bot(cfg):
         {"command": "newvps", "description": "🖥 Tạo / khởi động VPS GPU riêng"},
         {"command": "login", "description": "🔗 Liên kết acc Molab (Google): /login <email>"},
         {"command": "code", "description": "🔢 Nhập mã 6 số từ Gmail: /code <mã>"},
-        {"command": "rotate", "description": "🔄 Đổi cổng & mật khẩu SSH mới ngay"},
+        {"command": "rotate", "description": "🔄 Làm mới kết nối tunnel SSH ngay"},
         {"command": "save", "description": "💾 Đồng bộ dữ liệu lên Hugging Face ngay"},
         {"command": "pkgs", "description": "📦 Danh sách gói apt/pip tự cài"},
         {"command": "addpkg", "description": "➕ Cài & lưu gói: /addpkg <apt|pip> <tên>"},
@@ -648,19 +713,19 @@ def replace_cell_code(page, code_str):
     frame = wait_editor_frame(page, timeout=60)
     if frame is None:
         return False
-    editor = frame.locator(".cm-content").first
-    has_cmview = editor.evaluate("el => !!(el.cmView && el.cmView.view)")
-    if has_cmview:
-        editor.evaluate(
-            """(el, code) => {
-                const view = el.cmView.view;
-                view.dispatch({
-                    changes: { from: 0, to: view.state.doc.length, insert: code }
-                });
-            }""",
-            code_str,
-        )
-    else:
+    editor = find_ssh_cell(page) or frame.locator(".cm-content").first
+    updated = editor.evaluate(
+        """(el, code) => {
+            const view = (el.cmTile && el.cmTile.view) || (el.cmView && el.cmView.view);
+            if (!view) return false;
+            view.dispatch({
+                changes: { from: 0, to: view.state.doc.length, insert: code }
+            });
+            return true;
+        }""",
+        code_str,
+    )
+    if not updated:
         editor.click(position={"x": 80, "y": 20})
         page.keyboard.press("Control+a")
         page.keyboard.press("Backspace")
@@ -668,9 +733,190 @@ def replace_cell_code(page, code_str):
     page.wait_for_timeout(1000)
     save_btn = frame.get_by_test_id("save-button")
     if save_btn.count():
-        save_btn.first.click()
-        page.wait_for_timeout(2000)
+        try:
+            save_btn.first.click(timeout=3000)
+            page.wait_for_timeout(1500)
+        except Exception:
+            pass
     return True
+
+
+def build_user_cell_code(cfg, uid):
+    u = get_user_cfg(cfg, uid)
+    port = int(u.get("static_port") or _default_port_for_uid(uid))
+    pw = str(u.get("static_password") or f"molab{str(uid)[-4:]}")
+    code = (ROOT / "molab_ssh_pinggy.py").read_text(encoding="utf-8")
+    code = re.sub(r"STATIC_PORT\s*=\s*\d+", f"STATIC_PORT = {port}", code)
+    code = re.sub(r'STATIC_PASSWORD\s*=\s*"[^"]*"', f"STATIC_PASSWORD = {json.dumps(pw)}", code)
+    if str(uid) != ADMIN_ID:
+        code = re.sub(r'TOKEN\s*=\s*"[^"]*"', 'TOKEN = ""', code)
+    return code
+
+
+def ensure_static_cell_code(page, cfg, uid):
+    u = get_user_cfg(cfg, uid)
+    port = int(u.get("static_port") or _default_port_for_uid(uid))
+    pw = str(u.get("static_password") or f"molab{str(uid)[-4:]}")
+    wait_editor_frame(page, timeout=60)
+    take_over(page)
+    editor = find_ssh_cell(page)
+    cur_code = get_editor_code(editor) if editor is not None else ""
+    if (
+        "_start_pinggy_subprocess" in cur_code
+        and "sys.path[:]" in cur_code
+        and f"STATIC_PORT = {port}" in cur_code
+        and f"STATIC_PASSWORD = {json.dumps(pw)}" in cur_code
+    ):
+        return False
+    logging.info("Cập nhật cell SSH cố định (bore.pub:%s) cho ID %s", port, uid)
+    replace_cell_code(page, build_user_cell_code(cfg, uid))
+    return True
+
+
+BORE_HOST = "bore.pub"
+BORE_CTRL_PORT = 7835
+
+
+def _bore_send_json(sock, payload):
+    sock.sendall(json.dumps(payload).encode("utf-8") + b"\x00")
+
+
+def _bore_recv_json(sock, buf):
+    while b"\x00" not in buf:
+        chunk = sock.recv(4096)
+        if not chunk:
+            return None, buf
+        buf += chunk
+    raw, _, buf = buf.partition(b"\x00")
+    return json.loads(raw.decode("utf-8")), buf
+
+
+def _bore_pipe(src, dst):
+    try:
+        while True:
+            data = src.recv(16384)
+            if not data:
+                break
+            dst.sendall(data)
+    except Exception:
+        pass
+    finally:
+        for s in (dst, src):
+            try:
+                s.close()
+            except Exception:
+                pass
+
+
+def _bore_handshake(req_port):
+    ctrl = socket.create_connection((BORE_HOST, BORE_CTRL_PORT), timeout=8)
+    ctrl.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    ctrl.settimeout(8)
+    _bore_send_json(ctrl, {"Hello": int(req_port)})
+    msg, buf = _bore_recv_json(ctrl, b"")
+    if not msg or "Hello" not in msg:
+        ctrl.close()
+        raise RuntimeError(f"Bore handshake failed: {msg}")
+    ctrl.settimeout(35)
+    return ctrl, int(msg["Hello"]), buf
+
+
+def stop_bore_bridge(st):
+    if not st:
+        return
+    ev = st.get("bore_stop")
+    if ev is not None:
+        ev.set()
+    sock = st.get("bore_sock")
+    if sock is not None:
+        try:
+            sock.close()
+        except Exception:
+            pass
+    st["bore_stop"] = None
+    st["bore_sock"] = None
+    st["bore_thread"] = None
+
+
+def attach_bore_bridge(cfg, uid, raw_result, st):
+    if not raw_result:
+        return None
+    raw_line, password = raw_result
+    m = re.search(r"-p\s+(\d+)\s+\S+@(\S+)", raw_line)
+    if not m:
+        return raw_result
+    target_port, target_host = int(m.group(1)), m.group(2)
+    st["raw_last"] = raw_result
+    st["raw_target"] = (target_host, target_port)
+
+    u = get_user_cfg(cfg, uid)
+    desired_port = int(u.get("static_port") or _default_port_for_uid(uid))
+    thr = st.get("bore_thread")
+    if thr and thr.is_alive() and st.get("bore_port") == desired_port:
+        return (f"ssh -o ServerAliveInterval=30 -p {desired_port} molab@{BORE_HOST}", password)
+
+    stop_bore_bridge(st)
+    ctrl = None
+    assigned_port = None
+    buf = b""
+    for attempt in range(4):
+        try:
+            req = desired_port if attempt < 3 else 0
+            ctrl, assigned_port, buf = _bore_handshake(req)
+            break
+        except Exception:
+            time.sleep(1.5)
+    if ctrl is None or assigned_port is None:
+        logging.warning("Không mở được bore.pub cho [%s], dùng trực tiếp Pinggy", uid)
+        return raw_result
+
+    stop_ev = threading.Event()
+    st["bore_stop"] = stop_ev
+    st["bore_sock"] = ctrl
+    st["bore_port"] = assigned_port
+
+    def _accept_conn(conn_id):
+        try:
+            rem = socket.create_connection((BORE_HOST, BORE_CTRL_PORT), timeout=10)
+            rem.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            _bore_send_json(rem, {"Accept": conn_id})
+            thost, tport = st.get("raw_target") or (target_host, target_port)
+            loc = socket.create_connection((thost, tport), timeout=10)
+            loc.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            threading.Thread(target=_bore_pipe, args=(rem, loc), daemon=True).start()
+            threading.Thread(target=_bore_pipe, args=(loc, rem), daemon=True).start()
+        except Exception:
+            pass
+
+    def _bridge_loop(init_ctrl, init_buf, port_to_keep):
+        cur_ctrl = init_ctrl
+        cur_buf = init_buf
+        while not stop_ev.is_set():
+            try:
+                if cur_ctrl is None:
+                    cur_ctrl, _, cur_buf = _bore_handshake(port_to_keep)
+                    st["bore_sock"] = cur_ctrl
+                msg, cur_buf = _bore_recv_json(cur_ctrl, cur_buf)
+                if msg is None:
+                    raise EOFError("bore EOF")
+                if "Connection" in msg:
+                    threading.Thread(target=_accept_conn, args=(msg["Connection"],), daemon=True).start()
+                elif "Error" in msg:
+                    raise RuntimeError(msg["Error"])
+            except Exception:
+                if cur_ctrl is not None:
+                    try:
+                        cur_ctrl.close()
+                    except Exception:
+                        pass
+                    cur_ctrl = None
+                if not stop_ev.is_set():
+                    time.sleep(2.0)
+
+    b_thr = threading.Thread(target=_bridge_loop, args=(ctrl, buf, assigned_port), daemon=True)
+    b_thr.start()
+    st["bore_thread"] = b_thr
+    return (f"ssh -o ServerAliveInterval=30 -p {assigned_port} molab@{BORE_HOST}", password)
 
 
 def ensure_gpu_compute(page):
@@ -857,6 +1103,7 @@ def stop_user_vps(uid, active_sessions):
     st = active_sessions.pop(uid, None)
     if not st:
         return False
+    stop_bore_bridge(st)
     try:
         st["context"].close()
     except Exception:
@@ -932,17 +1179,16 @@ def provision_or_start_user_vps(
             take_over(page)
             ensure_gpu_compute(page)
             take_over(page)
-            if uid != ADMIN_ID:
-                cell_code = (ROOT / "molab_ssh_pinggy.py").read_text(encoding="utf-8")
-                cell_code = re.sub(r'TOKEN\s*=\s*"[^"]*"', 'TOKEN = ""', cell_code)
-                replace_cell_code(page, cell_code)
+            replace_cell_code(page, build_user_cell_code(cfg, uid))
+            code_updated = True
         else:
             page.goto(u["notebook_url"], wait_until="domcontentloaded", timeout=120000)
             page.wait_for_timeout(5000)
             ensure_gpu_compute(page)
+            code_updated = ensure_static_cell_code(page, cfg, uid)
 
-        result = ensure_running(page, force_rerun=need_provision)
-        if not result:
+        raw_result = ensure_running(page, force_rerun=need_provision or code_updated)
+        if not raw_result:
             page.screenshot(path=str(ROOT / "error.png"), full_page=True)
             ctx.close()
             return False, "❌ <b>Không khởi chạy được cell SSH trên notebook.</b>"
@@ -952,11 +1198,13 @@ def provision_or_start_user_vps(
             "uid": uid,
             "context": ctx,
             "page": page,
-            "last": result,
+            "last": raw_result,
             "next_rerun": now + cfg["cell_rerun_minutes"] * 60,
             "next_restart": now + cfg["session_restart_minutes"] * 60,
             "next_heartbeat": now + 30,
         }
+        result = attach_bore_bridge(cfg, uid, raw_result, st)
+        st["last"] = result
         active_sessions[uid] = st
         publish(cfg, result, st, uid=uid, notify_chat_id=notify_chat_id)
         return True, f"✅ <b>VPS của ID <code>{html.escape(uid)}</code> đã sẵn sàng!</b>"
@@ -1270,14 +1518,109 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
                 send_telegram(cfg, f"⚠️ ID <code>{html.escape(pick)}</code> chưa có trong danh sách <code>/ids</code>.", chat_id=chat_id)
         elif cmd == "/ssh":
             if not state:
+                u = get_user_cfg(cfg, target_uid)
                 send_telegram(
                     cfg,
                     target_banner
-                    + f"⚠️ <b>VPS của ID <code>{html.escape(target_uid)}</code> chưa chạy.</b>\nBấm nút <b>🚀 Tạo / Bật VPS</b> (<code>/newvps</code>) để khởi động!",
+                    + f"⚠️ <b>VPS của ID <code>{html.escape(target_uid)}</code> chưa chạy.</b>\n"
+                    f"📌 <b>Địa chỉ cố định của bạn:</b> <code>ssh -o ServerAliveInterval=30 -p {u['static_port']} molab@bore.pub</code>\n"
+                    f"🔐 <b>Mật khẩu cố định:</b> <code>{html.escape(u['static_password'])}</code>\n\n"
+                    "Bấm nút <b>🚀 Tạo / Bật VPS</b> (<code>/newvps</code>) để khởi động!",
                     chat_id=chat_id,
                 )
                 continue
             send_telegram(cfg, target_banner + format_ssh_card(cfg, state["last"], state, uid=target_uid), chat_id=chat_id)
+        elif cmd == "/setpass":
+            new_pw = arg.strip()
+            u = get_user_cfg(cfg, target_uid)
+            if len(new_pw) < 4 or any(c.isspace() for c in new_pw):
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + "🔐 <b>ĐẶT MẬT KHẨU SSH CỐ ĐỊNH</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Mật khẩu hiện tại:</b> <code>{html.escape(u['static_password'])}</code>\n"
+                    "• <b>Cách đổi:</b> <code>/setpass &lt;mật_khẩu_mới&gt;</code> (tối thiểu 4 ký tự, không khoảng trắng)",
+                    chat_id=chat_id,
+                )
+                continue
+            u["static_password"] = new_pw
+            save_config(cfg)
+            if state and state.get("last"):
+                try:
+                    import shlex
+
+                    port = int(u["static_port"])
+                    cfg_json = json.dumps({"port": port, "password": new_pw})
+                    ssh_exec(
+                        state["last"],
+                        f"printf '%s\\n' {shlex.quote(f'molab:{new_pw}')} {shlex.quote(f'root:{new_pw}')} | chpasswd && "
+                        f"printf '%s\\n' {shlex.quote(cfg_json)} > /home/marimo/.ssh_static.json && chmod 600 /home/marimo/.ssh_static.json",
+                        timeout=30,
+                    )
+                    ensure_static_cell_code(state["page"], cfg, target_uid)
+                    state["last"] = (state["last"][0], new_pw)
+                    publish(cfg, state["last"], state, uid=target_uid, notify_chat_id=chat_id)
+                except Exception as exc:
+                    send_telegram(
+                        cfg,
+                        target_banner + f"⚠️ Đã lưu mật khẩu mới nhưng chưa cập nhật trực tiếp qua SSH: <code>{html.escape(str(exc))}</code>",
+                        chat_id=chat_id,
+                    )
+            else:
+                send_telegram(
+                    cfg,
+                    target_banner + f"✅ <b>Đã đặt mật khẩu SSH cố định mới:</b> <code>{html.escape(new_pw)}</code>",
+                    chat_id=chat_id,
+                )
+        elif cmd == "/setport":
+            u = get_user_cfg(cfg, target_uid)
+            if not arg.strip().isdigit() or not (10000 <= int(arg.strip()) <= 60000):
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + "📌 <b>ĐỔI CỔNG SSH CỐ ĐỊNH (bore.pub)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Cổng hiện tại:</b> <code>{u['static_port']}</code>\n"
+                    "• <b>Cách đổi:</b> <code>/setport &lt;10000-60000&gt;</code> (ví dụ: <code>/setport 45678</code>)",
+                    chat_id=chat_id,
+                )
+                continue
+            new_port = int(arg.strip())
+            u["static_port"] = new_port
+            save_config(cfg)
+            if state and state.get("page"):
+                send_telegram(
+                    cfg,
+                    target_banner + f"⏳ <b>Đang chuyển cổng cố định sang <code>bore.pub:{new_port}</code>...</b>",
+                    chat_id=chat_id,
+                    menu=False,
+                )
+                try:
+                    import shlex
+
+                    cfg_json = json.dumps({"port": new_port, "password": u["static_password"]})
+                    ssh_exec(
+                        state["last"],
+                        f"printf '%s\\n' {shlex.quote(cfg_json)} > /home/marimo/.ssh_static.json && chmod 600 /home/marimo/.ssh_static.json",
+                        timeout=20,
+                    )
+                except Exception:
+                    pass
+                ensure_static_cell_code(state["page"], cfg, target_uid)
+                raw_cur = state.get("raw_last") or ensure_running(state["page"], force_rerun=False)
+                if raw_cur:
+                    new = attach_bore_bridge(cfg, target_uid, (raw_cur[0], u["static_password"]), state)
+                    state["last"] = new
+                    publish(cfg, new, state, uid=target_uid, notify_chat_id=chat_id)
+                else:
+                    send_telegram(cfg, target_banner + "❌ <b>Không chuyển được sang cổng mới.</b>", chat_id=chat_id)
+            else:
+                send_telegram(
+                    cfg,
+                    target_banner + f"✅ <b>Đã lưu cổng SSH cố định mới:</b> <code>bore.pub:{new_port}</code>",
+                    chat_id=chat_id,
+                )
         elif cmd == "/status":
             send_telegram(cfg, target_banner + get_vps_status_card(cfg, state, uid=target_uid), chat_id=chat_id)
         elif cmd == "/rotate":
@@ -1286,17 +1629,20 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
                 continue
             send_telegram(
                 cfg,
-                target_banner + "⏳ <b>Đang khởi tạo cổng & mật khẩu SSH mới...</b>\n<i>Vui lòng đợi khoảng 10–70 giây.</i>",
+                target_banner + "⏳ <b>Đang làm mới kết nối tunnel SSH cố định...</b>\n<i>Vui lòng đợi khoảng 10–40 giây.</i>",
                 chat_id=chat_id,
                 menu=False,
             )
-            new = ensure_running(state["page"], force_rerun=True)
-            if new:
+            ensure_static_cell_code(state["page"], cfg, target_uid)
+            raw_new = ensure_running(state["page"], force_rerun=True)
+            if raw_new:
+                stop_bore_bridge(state)
+                new = attach_bore_bridge(cfg, target_uid, raw_new, state)
                 state["last"] = new
                 state["next_rerun"] = time.monotonic() + cfg["cell_rerun_minutes"] * 60
                 publish(cfg, new, state, uid=target_uid, notify_chat_id=chat_id)
             else:
-                send_telegram(cfg, target_banner + "❌ <b>Không tạo được cổng SSH mới.</b>", chat_id=chat_id)
+                send_telegram(cfg, target_banner + "❌ <b>Không làm mới được tunnel SSH.</b>", chat_id=chat_id)
         elif cmd == "/restart":
             if not state:
                 send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật. Hãy bấm 🚀 Tạo / Bật VPS trước.</b>", chat_id=chat_id)
@@ -1310,9 +1656,12 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
             sync_remote(cfg, state["last"], mode="--push", uid=target_uid)
             state["page"].reload(wait_until="domcontentloaded", timeout=120000)
             state["page"].wait_for_timeout(5000)
-            new = ensure_running(state["page"])
-            if new:
+            ensure_gpu_compute(state["page"])
+            ensure_static_cell_code(state["page"], cfg, target_uid)
+            raw_new = ensure_running(state["page"])
+            if raw_new:
                 now = time.monotonic()
+                new = attach_bore_bridge(cfg, target_uid, raw_new, state)
                 state["last"] = new
                 state["next_restart"] = now + cfg["session_restart_minutes"] * 60
                 state["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
@@ -1685,24 +2034,29 @@ def session(cfg):
                             sync_remote(cfg, st["last"], mode="--push", uid=uid)
                             page.reload(wait_until="domcontentloaded", timeout=120000)
                             page.wait_for_timeout(5000)
-                            new = ensure_running(page)
+                            ensure_gpu_compute(page)
+                            ensure_static_cell_code(page, cfg, uid)
+                            raw_new = ensure_running(page)
                             st["next_restart"] = now + cfg["session_restart_minutes"] * 60
                             st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-                            if new:
-                                if new != st["last"]:
-                                    publish(cfg, new, st, uid=uid)
+                            if raw_new:
+                                new = attach_bore_bridge(cfg, uid, raw_new, st)
                                 st["last"] = new
+                                publish(cfg, new, st, uid=uid)
                             else:
                                 page.screenshot(path=str(ROOT / "error.png"), full_page=True)
                                 logging.error("Reload [%s] xong nhưng không thấy SSH", uid)
                             continue
 
                         if now >= st["next_rerun"]:
-                            logging.info("Rerun cell [%s] (tunnel Pinggy 60 phút)", uid)
-                            new = ensure_running(page, force_rerun=True)
+                            logging.info("Làm mới ngầm đường truyền nền [%s] (giữ nguyên cổng cố định bore.pub)", uid)
+                            ensure_static_cell_code(page, cfg, uid)
+                            raw_new = ensure_running(page, force_rerun=True)
                             st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-                            if new:
-                                publish(cfg, new, st, uid=uid)
+                            if raw_new:
+                                new = attach_bore_bridge(cfg, uid, raw_new, st)
+                                if new != st["last"]:
+                                    publish(cfg, new, st, uid=uid)
                                 st["last"] = new
                             else:
                                 page.screenshot(path=str(ROOT / "error.png"), full_page=True)
