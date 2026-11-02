@@ -36,7 +36,7 @@ DOCKERD_BIN = Path("/usr/local/bin/molab-dockerd")
 DOCKER_CLI_BIN = Path("/usr/local/bin/docker")
 WINGS_BIN = Path("/usr/local/bin/wings")
 PTERO_BACKUP = WORK_DIR / ".pterodactyl"
-MAX_SYNC_FILE_BYTES = 100 * 1024 * 1024
+MAX_SYNC_FILE_BYTES = 50 * 1024 * 1024 * 1024
 IGNORE = [
     ".cache",
     ".cache/**",
@@ -52,6 +52,8 @@ IGNORE = [
     ".triton/**",
     ".npm",
     ".npm/**",
+    ".logs",
+    ".logs/**",
     ".bash*",
     ".profile",
     ".wget-hsts",
@@ -59,31 +61,18 @@ IGNORE = [
     ".git",
     "**/.git/**",
     "**/__pycache__/**",
-    "models",
-    "models/**",
-    "**/models/**",
-    "**/build/**",
     "**/CMakeFiles/**",
-    "*.gguf",
-    "**/*.gguf",
-    "*.safetensors",
-    "**/*.safetensors",
-    "*.bin",
-    "**/*.bin",
-    "*.pt",
-    "**/*.pt",
-    "*.pth",
-    "**/*.pth",
-    "*.onnx",
-    "**/*.onnx",
     "*.deb",
     "**/*.deb",
     "*.log",
     "**/*.log",
+    "*.part",
+    "**/*.part",
+    "*.aria2",
+    "**/*.aria2",
+    "*.tmp",
+    "**/*.tmp",
     "**/*.o",
-    "**/*.a",
-    "**/*.so",
-    "**/*.so.*",
 ]
 
 PIP_WRAP_CODE = """#!/usr/local/bin/python3
@@ -1103,8 +1092,9 @@ def ignored(rel_posix):
     )
 
 
-def scan_state():
+def scan_state(settle_sec=45):
     state = {}
+    now = time.time()
     for root, dirs, files in os.walk(WORK_DIR):
         rel_root = Path(root).relative_to(WORK_DIR).as_posix()
         dirs[:] = [
@@ -1119,6 +1109,8 @@ def scan_state():
             try:
                 st = (Path(root) / name).stat()
                 if st.st_size > MAX_SYNC_FILE_BYTES:
+                    continue
+                if settle_sec and st.st_size > 50 * 1024 * 1024 and (now - st.st_mtime) < settle_sec:
                     continue
                 state[rel] = (st.st_mtime_ns, st.st_size)
             except OSError:
@@ -1167,9 +1159,10 @@ def restore(cfg):
     print(f"Đã khôi phục dữ liệu & gói từ {cfg['hf_repo']} về {WORK_DIR}", flush=True)
 
 
-def push(cfg):
+def push(cfg, settle_sec=0):
     record_apt()
     backup_custom_systemd()
+    now = time.time()
     large_ignores = []
     for root, dirs, files in os.walk(WORK_DIR):
         rel_root = Path(root).relative_to(WORK_DIR).as_posix()
@@ -1183,7 +1176,10 @@ def push(cfg):
             if ignored(rel):
                 continue
             try:
-                if (Path(root) / name).stat().st_size > MAX_SYNC_FILE_BYTES:
+                st = (Path(root) / name).stat()
+                if st.st_size > MAX_SYNC_FILE_BYTES:
+                    large_ignores.append(rel)
+                elif settle_sec and st.st_size > 50 * 1024 * 1024 and (now - st.st_mtime) < settle_sec:
                     large_ignores.append(rel)
             except OSError:
                 pass
@@ -1216,7 +1212,7 @@ def daemon():
             cfg = load_cfg()
             cur = scan_state()
             if cur and cur != last:
-                push(cfg)
+                push(cfg, settle_sec=45)
                 last = cur
         except Exception as exc:
             print("sync error:", exc, flush=True)
