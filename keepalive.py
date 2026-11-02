@@ -19,8 +19,11 @@ import base64
 import html
 import json
 import logging
+import os
 import re
+import select
 import socket
+import struct
 import sys
 import threading
 import time
@@ -65,6 +68,7 @@ def setup_logging():
             logging.StreamHandler(),
         ],
     )
+    logging.getLogger("paramiko").setLevel(logging.CRITICAL)
 
 
 def visible_text(page):
@@ -133,9 +137,17 @@ def editor_frame(page):
     return None
 
 
+def _is_iframe_expired(page):
+    txt = visible_text(page).lower()
+    return "session expired" in txt or "sandbox not found" in txt
+
+
 def wait_editor_frame(page, timeout=180):
     deadline = time.time() + timeout
+    started = time.time()
+    reloaded = False
     while time.time() < deadline:
+        take_over(page)
         frame = editor_frame(page)
         if frame is not None:
             try:
@@ -144,6 +156,17 @@ def wait_editor_frame(page, timeout=180):
                     return frame
             except Exception:
                 return frame
+        if not reloaded:
+            vtxt = visible_text(page).lower()
+            busy = any(k in vtxt for k in ("scheduling", "starting", "provisioning", "connecting"))
+            if "session expired" in vtxt or (time.time() - started > 25 and not busy):
+                logging.info("Phiên hiển thị Molab hết hạn (session expired), tự động reload trang...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=120000)
+                    page.wait_for_timeout(5000)
+                except Exception:
+                    pass
+                reloaded = True
         page.wait_for_timeout(2000)  # molab đang "Scheduling sandbox..."
     return None
 
@@ -189,14 +212,24 @@ def restart_kernel(page):
     return ok
 
 
-def run_cell(page, timeout=420):
+def run_cell(page, timeout=240):
     deadline = time.time() + timeout
+    started_wait = time.time()
+    reloaded = False
     editor = None
     while time.time() < deadline:
         take_over(page)
         editor = find_ssh_cell(page)
         if editor is not None:
             break
+        if not reloaded and (_is_iframe_expired(page) or time.time() - started_wait > 25):
+            logging.info("Reload trang Molab để làm mới token hiển thị trước khi chạy cell...")
+            try:
+                page.reload(wait_until="domcontentloaded", timeout=120000)
+                page.wait_for_timeout(5000)
+            except Exception:
+                pass
+            reloaded = True
         page.wait_for_timeout(3000)  # molab đang "Scheduling sandbox..."
     if editor is None:
         logging.warning("Không thấy editor .cm-content sau %ss", timeout)
@@ -205,19 +238,37 @@ def run_cell(page, timeout=420):
     take_over(page)
     before = scrape(page)
     before_alive = tunnel_alive(before)
+    try:
+        editor.evaluate(
+            """el => {
+                const v = (el.cmTile && el.cmTile.view) || (el.cmView && el.cmView.view);
+                if (v) {
+                    v.focus();
+                    const s = v.state.doc.toString();
+                    v.dispatch({ changes: { from: 0, to: v.state.doc.length, insert: s } });
+                } else {
+                    el.focus();
+                }
+            }"""
+        )
+        page.wait_for_timeout(300)
+    except Exception:
+        pass
     frame = editor_frame(page)
     run_btn = frame.get_by_test_id("run-button") if frame else None
     clicked_btn = False
     if run_btn and run_btn.count():
         try:
-            run_btn.first.click(force=True, timeout=5000)
+            for i in range(run_btn.count()):
+                run_btn.nth(i).click(force=True, timeout=4000)
             clicked_btn = True
         except Exception:
             clicked_btn = False
     if not clicked_btn:
-        editor.click(position={"x": 80, "y": 20})
-        page.wait_for_timeout(300)
-        page.keyboard.press("Shift+Enter")
+        try:
+            page.keyboard.press("Shift+Enter")
+        except Exception:
+            pass
     page.wait_for_timeout(6000)
     started = time.time()
     while time.time() < deadline:
@@ -266,15 +317,26 @@ def tunnel_alive(result):
     match = re.search(r"-p\s+(\d+)\s+\S+@(\S+)", result[0])
     if not match:
         return False
-    try:
-        with socket.create_connection((match.group(2), int(match.group(1))), timeout=5) as sock:
-            sock.settimeout(5)
-            return sock.recv(16).startswith(b"SSH-")
-    except OSError:
-        return False
+    host, port = match.group(2), int(match.group(1))
+    for attempt in range(2):
+        try:
+            with socket.create_connection((host, port), timeout=5) as sock:
+                sock.settimeout(5)
+                if BORE_HOST not in host:
+                    try:
+                        sock.sendall(b"RAW0")
+                    except Exception:
+                        pass
+                if sock.recv(16).startswith(b"SSH-"):
+                    return True
+        except OSError:
+            pass
+        if attempt == 0:
+            time.sleep(0.6)
+    return False
 
 
-def ensure_running(page, timeout=420, attempts=3, force_rerun=False):
+def ensure_running(page, timeout=240, attempts=3, force_rerun=False):
     if not force_rerun and wait_editor_frame(page, timeout=60) is not None:
         page.wait_for_timeout(5000)
         take_over(page)
@@ -284,13 +346,19 @@ def ensure_running(page, timeout=420, attempts=3, force_rerun=False):
             return existing
     for attempt in range(1, attempts + 1):
         take_over(page)
-        result = run_cell(page, timeout)  # chạy lại cell; tunnel cũ bị force=True đá
+        result = run_cell(page, timeout)
         if result:
             return result
         logging.warning("Lần %s/%s không lấy được địa chỉ SSH", attempt, attempts)
-        # Fallback: restart kernel để xoá sạch tunnel cũ rồi thử lại
-        restart_kernel(page)
-        page.wait_for_timeout(5000)
+        try:
+            page.reload(wait_until="domcontentloaded", timeout=120000)
+            page.wait_for_timeout(5000)
+            ensure_gpu_compute(page)
+        except Exception:
+            pass
+        if attempt >= 2:
+            restart_kernel(page)
+            page.wait_for_timeout(5000)
     return None
 
 
@@ -920,7 +988,7 @@ def ensure_static_cell_code(page, cfg, uid, idx=None):
     if (
         "_start_pinggy_subprocess" in cur_code
         and "_ensure_py_deps" in cur_code
-        and "sys.path[:]" in cur_code
+        and "# MSSH_V6" in cur_code
         and f"STATIC_PORT = {port}" in cur_code
         and f"STATIC_PASSWORD = {json.dumps(pw)}" in cur_code
     ):
@@ -995,6 +1063,16 @@ def stop_bore_bridge(st):
     st["bore_thread"] = None
 
 
+def _mssh_recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError()
+        buf.extend(chunk)
+    return bytes(buf)
+
+
 def attach_bore_bridge(cfg, uid, raw_result, st, idx=None):
     if not raw_result:
         return None
@@ -1033,24 +1111,185 @@ def attach_bore_bridge(cfg, uid, raw_result, st, idx=None):
     st["bore_port"] = assigned_port
 
     def _accept_conn(conn_id):
+        rem = None
         try:
             rem = socket.create_connection((BORE_HOST, BORE_CTRL_PORT), timeout=10)
             rem.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             _bore_send_json(rem, {"Accept": conn_id})
-            thost, tport = st.get("raw_target") or (target_host, target_port)
-            loc = socket.create_connection((thost, tport), timeout=10)
-            loc.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            # Clear the 10s connect timeout so idle SSH sessions never get dropped
-            for s in (rem, loc):
-                s.settimeout(None)
+            rem.settimeout(None)
+            try:
+                rem.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+            except Exception:
+                pass
+        except Exception:
+            if rem is not None:
                 try:
-                    s.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    rem.close()
                 except Exception:
                     pass
-            threading.Thread(target=_bore_pipe, args=(rem, loc), daemon=True).start()
-            threading.Thread(target=_bore_pipe, args=(loc, rem), daemon=True).start()
-        except Exception:
-            pass
+            return
+
+        sid = os.urandom(16)
+        lock = threading.Lock()
+        tx_base = 0
+        tx_buf = bytearray()
+        rx_off = 0
+        closed = False
+        holder = {"carrier": None}
+
+        def _rem_reader():
+            nonlocal tx_base, closed
+            try:
+                while not stop_ev.is_set():
+                    data = rem.recv(16384)
+                    if not data:
+                        break
+                    with lock:
+                        tx_buf.extend(data)
+                        if len(tx_buf) > 8 * 1024 * 1024:
+                            drop = len(tx_buf) - 4 * 1024 * 1024
+                            del tx_buf[:drop]
+                            tx_base += drop
+                        c = holder["carrier"]
+                        if c is not None:
+                            try:
+                                c.sendall(struct.pack("!BI", 1, len(data)) + data)
+                            except Exception:
+                                pass
+            except Exception:
+                pass
+            finally:
+                with lock:
+                    closed = True
+                    c = holder["carrier"]
+                    if c is not None:
+                        try:
+                            c.sendall(struct.pack("!BI", 3, 0))
+                            c.close()
+                        except Exception:
+                            pass
+
+        threading.Thread(target=_rem_reader, daemon=True).start()
+        fail_since = None
+
+        try:
+            while not stop_ev.is_set():
+                with lock:
+                    if closed:
+                        break
+                thost, tport = st.get("raw_target") or (target_host, target_port)
+                cur_target = (thost, tport)
+                c = None
+                try:
+                    c = socket.create_connection(cur_target, timeout=10)
+                    c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    c.settimeout(12.0)
+                    with lock:
+                        cur_rx = rx_off
+                    c.sendall(struct.pack("!4s16sQ", b"MSSH", sid, cur_rx))
+                    hdr4 = _mssh_recv_exact(c, 4)
+                    if hdr4 != b"MSOK":
+                        if cur_rx > 0 or tx_base > 0:
+                            raise RuntimeError(f"MSSH bad header: {hdr4!r}")
+                        c.settimeout(None)
+                        rem.sendall(hdr4)
+                        with lock:
+                            if tx_buf:
+                                c.sendall(bytes(tx_buf))
+                                tx_buf.clear()
+                        _bore_pipe(c, rem)
+                        break
+                    peer_rx = struct.unpack("!Q", _mssh_recv_exact(c, 8))[0]
+                    c.settimeout(30.0)
+                    with lock:
+                        drop = max(0, min(len(tx_buf), peer_rx - tx_base))
+                        if drop:
+                            del tx_buf[:drop]
+                            tx_base += drop
+                        if tx_buf:
+                            c.sendall(struct.pack("!BI", 1, len(tx_buf)) + bytes(tx_buf))
+                        if closed:
+                            c.sendall(struct.pack("!BI", 3, 0))
+                            c.close()
+                            break
+                        holder["carrier"] = c
+                    fail_since = None
+
+                    last_ping = time.monotonic()
+                    while not stop_ev.is_set():
+                        with lock:
+                            if closed:
+                                break
+                        latest_target = st.get("raw_target") or (target_host, target_port)
+                        if latest_target != cur_target:
+                            break
+                        r, _, _ = select.select([c], [], [], 2.5)
+                        if not r:
+                            if time.monotonic() - last_ping >= 15.0:
+                                with lock:
+                                    if holder["carrier"] is c:
+                                        c.sendall(struct.pack("!BI", 4, 0))
+                                last_ping = time.monotonic()
+                            continue
+                        ftype, flen = struct.unpack("!BI", _mssh_recv_exact(c, 5))
+                        body = _mssh_recv_exact(c, flen) if flen else b""
+                        if ftype == 1:
+                            rem.sendall(body)
+                            with lock:
+                                rx_off += len(body)
+                                if holder["carrier"] is c:
+                                    c.sendall(struct.pack("!BIQ", 2, 8, rx_off))
+                        elif ftype == 2 and flen == 8:
+                            ack_off = struct.unpack("!Q", body)[0]
+                            with lock:
+                                drop = max(0, min(len(tx_buf), ack_off - tx_base))
+                                if drop:
+                                    del tx_buf[:drop]
+                                    tx_base += drop
+                        elif ftype == 3:
+                            with lock:
+                                closed = True
+                            break
+                        elif ftype == 5 and body:
+                            try:
+                                info = json.loads(body.decode("utf-8", "ignore"))
+                                nh = str(info.get("host") or "").strip()
+                                np = int(info.get("port") or 0)
+                                if nh and np and (nh, np) != st.get("raw_target"):
+                                    st["raw_target"] = (nh, np)
+                                    if st.get("raw_last"):
+                                        st["raw_last"] = (f"ssh -o ServerAliveInterval=30 -p {np} molab@{nh}", st["raw_last"][1])
+                                    logging.info(
+                                        "Đã chuyển mượt đường truyền ngầm [%s#%s] -> %s:%s (qua MSSH push)",
+                                        st.get("uid"),
+                                        st.get("idx"),
+                                        nh,
+                                        np,
+                                    )
+                            except Exception:
+                                pass
+                except Exception:
+                    if fail_since is None:
+                        fail_since = time.monotonic()
+                    elif time.monotonic() - fail_since > 45.0:
+                        break
+                    time.sleep(0.8)
+                finally:
+                    with lock:
+                        if holder["carrier"] is c:
+                            holder["carrier"] = None
+                    if c is not None:
+                        try:
+                            c.close()
+                        except Exception:
+                            pass
+        finally:
+            with lock:
+                closed = True
+            try:
+                rem.close()
+            except Exception:
+                pass
 
     def _bridge_loop(init_ctrl, init_buf, port_to_keep):
         cur_ctrl = init_ctrl
@@ -1077,8 +1316,19 @@ def attach_bore_bridge(cfg, uid, raw_result, st, idx=None):
                 if not stop_ev.is_set():
                     time.sleep(2.0)
 
+    def _url_poll_loop():
+        while not stop_ev.is_set():
+            time.sleep(15.0)
+            if stop_ev.is_set():
+                break
+            try:
+                poll_remote_pinggy_url(st)
+            except Exception:
+                pass
+
     b_thr = threading.Thread(target=_bridge_loop, args=(ctrl, buf, assigned_port), daemon=True)
     b_thr.start()
+    threading.Thread(target=_url_poll_loop, daemon=True).start()
     st["bore_thread"] = b_thr
     return (f"ssh -o ServerAliveInterval=30 -p {assigned_port} molab@{BORE_HOST}", password)
 
@@ -2506,6 +2756,51 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
                 send_telegram(cfg, f"⚠️ Không tìm thấy ID <code>{html.escape(rem_id)}</code>.", chat_id=chat_id)
 
 
+def poll_remote_pinggy_url(st):
+    if not st or not st.get("last"):
+        return False
+    pw = st["last"][1]
+    raw_target = st.get("raw_target")
+    try:
+        out = ""
+        if raw_target:
+            try:
+                with socket.create_connection(raw_target, timeout=5) as s:
+                    s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+                    s.settimeout(5)
+                    s.sendall(b"MURL")
+                    out = s.recv(4096).decode("utf-8", "ignore").strip()
+                    if not out.startswith("{"):
+                        out = ""
+            except Exception:
+                out = ""
+        if not out:
+            out = ssh_exec(st["last"], "cat /tmp/molab_pinggy_url.json 2>/dev/null || true", timeout=8).strip()
+        if not out:
+            return False
+        data = json.loads(out.splitlines()[-1])
+        h = str(data.get("host") or "").strip()
+        p = int(data.get("port") or 0)
+        if not h or not p:
+            return False
+        if (h, p) != st.get("raw_target"):
+            cand = (f"ssh -o ServerAliveInterval=30 -p {p} molab@{h}", pw)
+            if tunnel_alive(cand):
+                st["raw_target"] = (h, p)
+                st["raw_last"] = cand
+                logging.info(
+                    "Đã chuyển mượt đường truyền ngầm [%s#%s] -> %s:%s (giữ nguyên kết nối bore.pub)",
+                    st.get("uid"),
+                    st.get("idx"),
+                    h,
+                    p,
+                )
+                return True
+        return True
+    except Exception:
+        return False
+
+
 def session(cfg):
     with sync_playwright() as playwright:
         active_sessions = {}
@@ -2579,23 +2874,32 @@ def session(cfg):
                                 logging.error("Reload [%s#%s] xong nhưng không thấy SSH", uid, nb_idx)
                             continue
 
+                        if now >= st.get("next_tunnel_poll", 0):
+                            st["next_tunnel_poll"] = now + 35
+                            poll_remote_pinggy_url(st)
+
                         if now >= st.get("next_healthcheck", 0):
-                            st["next_healthcheck"] = now + 180
+                            st["next_healthcheck"] = now + 120
+                            if st.get("last") and not tunnel_alive(st["last"]):
+                                poll_remote_pinggy_url(st)
                             if st.get("last") and not tunnel_alive(st["last"]):
                                 logging.warning("Phát hiện tunnel [%s#%s] mất kết nối sớm, tự động khôi phục...", uid, nb_idx)
                                 ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
                                 raw_new = ensure_running(page, force_rerun=True)
                                 if raw_new:
-                                    stop_bore_bridge(st)
                                     new = attach_bore_bridge(cfg, uid, raw_new, st, idx=nb_idx)
                                     st["last"] = new
                                     st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
 
                         if now >= st["next_rerun"]:
+                            st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
+                            poll_remote_pinggy_url(st)
+                            if st.get("last") and tunnel_alive(st["last"]):
+                                logging.info("Đường truyền nền [%s#%s] đã tự xoay vòng ngầm, giữ nguyên phiên SSH", uid, nb_idx)
+                                continue
                             logging.info("Làm mới ngầm đường truyền nền [%s#%s] (giữ nguyên cổng cố định bore.pub)", uid, nb_idx)
                             ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
                             raw_new = ensure_running(page, force_rerun=True)
-                            st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
                             if raw_new:
                                 new = attach_bore_bridge(cfg, uid, raw_new, st, idx=nb_idx)
                                 if new != st["last"]:

@@ -36,6 +36,7 @@ DOCKERD_BIN = Path("/usr/local/bin/molab-dockerd")
 DOCKER_CLI_BIN = Path("/usr/local/bin/docker")
 WINGS_BIN = Path("/usr/local/bin/wings")
 PTERO_BACKUP = WORK_DIR / ".pterodactyl"
+MAX_SYNC_FILE_BYTES = 100 * 1024 * 1024
 IGNORE = [
     ".cache",
     ".cache/**",
@@ -49,6 +50,8 @@ IGNORE = [
     ".nv/**",
     ".triton",
     ".triton/**",
+    ".npm",
+    ".npm/**",
     ".bash*",
     ".profile",
     ".wget-hsts",
@@ -56,6 +59,31 @@ IGNORE = [
     ".git",
     "**/.git/**",
     "**/__pycache__/**",
+    "models",
+    "models/**",
+    "**/models/**",
+    "**/build/**",
+    "**/CMakeFiles/**",
+    "*.gguf",
+    "**/*.gguf",
+    "*.safetensors",
+    "**/*.safetensors",
+    "*.bin",
+    "**/*.bin",
+    "*.pt",
+    "**/*.pt",
+    "*.pth",
+    "**/*.pth",
+    "*.onnx",
+    "**/*.onnx",
+    "*.deb",
+    "**/*.deb",
+    "*.log",
+    "**/*.log",
+    "**/*.o",
+    "**/*.a",
+    "**/*.so",
+    "**/*.so.*",
 ]
 
 PIP_WRAP_CODE = """#!/usr/local/bin/python3
@@ -1090,6 +1118,8 @@ def scan_state():
                 continue
             try:
                 st = (Path(root) / name).stat()
+                if st.st_size > MAX_SYNC_FILE_BYTES:
+                    continue
                 state[rel] = (st.st_mtime_ns, st.st_size)
             except OSError:
                 pass
@@ -1140,6 +1170,23 @@ def restore(cfg):
 def push(cfg):
     record_apt()
     backup_custom_systemd()
+    large_ignores = []
+    for root, dirs, files in os.walk(WORK_DIR):
+        rel_root = Path(root).relative_to(WORK_DIR).as_posix()
+        dirs[:] = [
+            d
+            for d in dirs
+            if not ignored(f"{rel_root}/{d}".lstrip("./")) and d != ".git"
+        ]
+        for name in files:
+            rel = f"{rel_root}/{name}".lstrip("./") if rel_root != "." else name
+            if ignored(rel):
+                continue
+            try:
+                if (Path(root) / name).stat().st_size > MAX_SYNC_FILE_BYTES:
+                    large_ignores.append(rel)
+            except OSError:
+                pass
     api = HfApi(token=cfg["hf_token"])
     api.create_repo(
         repo_id=cfg["hf_repo"], repo_type="dataset", private=True, exist_ok=True
@@ -1148,7 +1195,7 @@ def push(cfg):
         repo_id=cfg["hf_repo"],
         repo_type="dataset",
         folder_path=str(WORK_DIR),
-        ignore_patterns=IGNORE,
+        ignore_patterns=IGNORE + large_ignores,
         commit_message=f"molab sync {time.strftime('%Y-%m-%d %H:%M:%S')}",
     )
     print(
