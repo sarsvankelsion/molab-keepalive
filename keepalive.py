@@ -385,14 +385,17 @@ ADMIN_KEYBOARD = {
         ],
         [
             {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+            {"text": "🤗 Gắn HF Token", "callback_data": "/sethf"},
+        ],
+        [
             {"text": "💾 Backup HF ngay", "callback_data": "/save"},
-        ],
-        [
             {"text": "👥 Quản lý Member", "callback_data": "/ids"},
-            {"text": "📘 Hướng dẫn A-Z", "callback_data": "/guide"},
         ],
         [
+            {"text": "📘 Hướng dẫn A-Z", "callback_data": "/guide"},
             {"text": "🔄 Làm mới SSH", "callback_data": "/rotate"},
+        ],
+        [
             {"text": "♻️ Reset phiên 12h", "callback_data": "/restart"},
         ],
     ]
@@ -417,11 +420,14 @@ USER_KEYBOARD = {
             {"text": "🦅 Pterodactyl Wings", "callback_data": "/wings"},
         ],
         [
-            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
+            {"text": "🤗 Gắn HF Token", "callback_data": "/sethf"},
             {"text": "💾 Backup HF ngay", "callback_data": "/save"},
         ],
         [
+            {"text": "📦 Gói tự cài", "callback_data": "/pkgs"},
             {"text": "📘 Hướng dẫn A-Z", "callback_data": "/guide"},
+        ],
+        [
             {"text": "🛑 Tắt VPS", "callback_data": "/stopvps"},
         ],
     ]
@@ -457,7 +463,9 @@ def get_member_guide(cfg, uid):
         "• Gõ trên bot: <code>/deploy python3 bot.py</code> (hoặc trong SSH gõ: <code>deploy python3 bot.py</code>).\n"
         "• Hệ thống tự tạo systemd service chạy ngầm, tự khởi động lại nếu crash và <b>tự chạy lại sau mỗi lần reset phiên 12h</b>!\n"
         "• Quản lý, xem log, xoá app: bấm <b>🚀 App chạy ngầm</b> (<code>/apps</code>).\n\n"
-        "<b>5️⃣ BƯỚC 5: CÀI GÓI & LƯU DỮ LIỆU VĨNH VIỄN</b>\n"
+        "<b>5️⃣ BƯỚC 5: GẮN HUGGING FACE TOKEN & LƯU DỮ LIỆU VĨNH VIỄN</b>\n"
+        "• Mỗi tài khoản dùng <b>Token Hugging Face riêng</b> để tự động backup dữ liệu & model (tối đa 50GB/file).\n"
+        "• Tạo Write Token tại <a href='https://huggingface.co/settings/tokens'>huggingface.co/settings/tokens</a> rồi gõ: <code>/sethf hf_xxxx</code>\n"
         "• Cài gói tự động giữ lại sau 12h: <code>/addpkg apt tmux ffmpeg</code> hoặc <code>/addpkg pip torch</code>.\n"
         "• Lưu dữ liệu <code>/home/marimo</code> ngay lập tức: bấm <b>💾 Backup HF ngay</b> (<code>/save</code>) hoặc gõ <code>save</code> trong SSH."
     )
@@ -482,8 +490,9 @@ def get_bot_help(is_admin=False):
         "• <code>/deploy python3 bot.py</code> — Chạy ngầm & tự sống lại sau 12h\n"
         "• <code>/apps</code> | <code>/applog 1</code> | <code>/undep 1</code> — Quản lý App ngầm\n"
         "• <code>/wings</code> — 🦅 Quản lý Docker Socket Shim & Pterodactyl Wings\n\n"
-        "🔗 <b>Tài khoản & Hệ thống</b>\n"
+        "🔗 <b>Tài khoản, Backup Hugging Face & Hệ thống</b>\n"
         "• <code>/login email@gmail.com</code> | <code>/code 123456</code> — Liên kết Molab\n"
+        "• <code>/sethf hf_xxxx</code> — 🤗 Gắn Token Hugging Face cá nhân để backup dữ liệu 12h\n"
         "• <code>/status</code> | <code>/rotate</code> | <code>/restart</code> | <code>/save</code>\n"
         "• <code>/pkgs</code> | <code>/addpkg apt tên</code> | <code>/sh lệnh</code>\n"
     )
@@ -560,7 +569,8 @@ def get_user_cfg(cfg, uid):
         defaults = {
             "profile_dir": f"profiles/{uid}",
             "notebook_url": "",
-            "hf_repo": f"{base_hf}-{uid}",
+            "hf_token": "",
+            "hf_repo": "",
             "output_file": f"last_ssh_{uid}.txt",
             "logged_in": False,
             "email": "",
@@ -569,14 +579,18 @@ def get_user_cfg(cfg, uid):
             "active_idx": 1,
         }
     for k, v in defaults.items():
-        if k not in u or u[k] == "":
+        if k not in u or (u[k] == "" and v != ""):
             u[k] = v
             changed = True
+    if uid != ADMIN_ID and not u.get("hf_token") and str(u.get("hf_repo", "")).startswith(base_hf):
+        u["hf_repo"] = ""
+        changed = True
     if uid == ADMIN_ID:
         u["profile_dir"] = cfg["profile_dir"]
         if not u.get("notebook_url"):
             u["notebook_url"] = cfg["notebook_url"]
-        u["hf_repo"] = base_hf
+        if not u.get("hf_repo"):
+            u["hf_repo"] = base_hf
         u["output_file"] = cfg["output_file"]
         u["logged_in"] = True
     if not u.get("notebooks"):
@@ -601,7 +615,10 @@ def get_user_cfg(cfg, uid):
             if not nb.get("static_password"):
                 nb["static_password"] = str(u["static_password"])
                 changed = True
-            if not nb.get("hf_repo"):
+            if uid != ADMIN_ID and not u.get("hf_token") and str(nb.get("hf_repo", "")).startswith(base_hf):
+                nb["hf_repo"] = ""
+                changed = True
+            elif not nb.get("hf_repo") and u.get("hf_repo"):
                 nb["hf_repo"] = u["hf_repo"] if i == 1 else f"{u['hf_repo']}-vps{i}"
                 changed = True
     if not (1 <= int(u.get("active_idx") or 1) <= len(u["notebooks"])):
@@ -626,7 +643,7 @@ def get_user_nb(cfg, uid, idx=None, create_new=False):
             "notebook_url": "",
             "static_port": _alloc_nb_port(cfg, uid, new_idx),
             "static_password": str(u["static_password"]),
-            "hf_repo": f"{u['hf_repo']}-vps{new_idx}",
+            "hf_repo": f"{u['hf_repo']}-vps{new_idx}" if u.get("hf_repo") else "",
         }
         nbs.append(nb)
         u["active_idx"] = new_idx
@@ -722,6 +739,38 @@ def send_telegram(cfg, text, chat_id=None, html_mode=True, menu=True, reply_mark
         tg_api(cfg, "sendMessage", payload)
 
 
+def _user_hf_credentials(cfg, uid, idx=None):
+    uid = str(uid).strip()
+    u = get_user_cfg(cfg, uid)
+    nb = get_user_nb(cfg, uid, idx=idx)
+    if uid == ADMIN_ID:
+        tok = (u.get("hf_token") or cfg.get("hf_token") or "").strip()
+        repo = (nb.get("hf_repo") or u.get("hf_repo") or cfg.get("hf_repo") or "").strip()
+    else:
+        tok = (u.get("hf_token") or "").strip()
+        repo = (nb.get("hf_repo") or u.get("hf_repo") or "").strip() if tok else ""
+    return tok, repo
+
+
+def _verify_hf_token(token):
+    token = (token or "").strip()
+    if not token:
+        return False, "Token trống"
+    req = urllib.request.Request(
+        "https://huggingface.co/api/whoami-v2",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+            name = (data.get("name") or "").strip()
+            if not name:
+                return False, "Không lấy được username từ Hugging Face"
+            return True, name
+    except Exception as exc:
+        return False, str(exc)
+
+
 def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, idx=None, title="🔑 <b>THÔNG TIN KẾT NỐI SSH CỐ ĐỊNH</b>"):
     u = get_user_cfg(cfg, uid)
     nb = get_user_nb(cfg, uid, idx=idx or (state.get("idx") if state else None))
@@ -738,7 +787,12 @@ def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, idx=None, title="🔑
         else:
             rem_ssh = max(0, int((state["next_rerun"] - time.monotonic()) // 60))
             timers = f"⏱ <b>Đổi cổng sau:</b> {rem_ssh} phút  |  <b>Reset phiên:</b> {rem_ses} phút\n"
-    repo = nb.get("hf_repo") or u.get("hf_repo") or "chưa cấu hình"
+    hf_tok, repo = _user_hf_credentials(cfg, uid, idx=nb_idx)
+    hf_line = (
+        f"☁️ <b>Backup HF:</b> <code>{html.escape(repo)}</code>\n\n"
+        if (hf_tok and repo)
+        else "☁️ <b>Backup HF:</b> ⚠️ <i>Chưa gắn Token (gõ <code>/sethf hf_...</code>)</i>\n\n"
+    )
     owner_line = (
         f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code> ({html.escape(u.get('email') or 'Chưa rõ')})\n"
         f"🖥 <b>Máy VPS:</b> <b>#{nb_idx}</b> / {len(u['notebooks'])} máy  |  <b>Cổng riêng:</b> <code>bore.pub:{nb['static_port']}</code>\n"
@@ -750,7 +804,7 @@ def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, idx=None, title="🔑
         f"📡 <b>Trạng thái:</b> {alive}\n"
         f"🕒 <b>Cập nhật:</b> <code>{time.strftime('%H:%M:%S — %d/%m/%Y')}</code>\n"
         f"{timers}"
-        f"☁️ <b>Backup HF:</b> <code>{html.escape(repo)}</code>\n\n"
+        f"{hf_line}"
         "🖥 <b>Lệnh SSH cố định</b> <i>(chạm để copy)</i>:\n"
         f"<code>{html.escape(ssh_line)}</code>\n\n"
         "🔐 <b>Mật khẩu cố định</b> <i>(chạm để copy)</i>:\n"
@@ -772,6 +826,7 @@ def init_telegram_bot(cfg):
         {"command": "use", "description": "🎯 Chuyển sang điều khiển VPS số #1, #2...: /use <số>"},
         {"command": "setpass", "description": "🔐 Đổi mật khẩu VPS: /setpass [id] <mật_khẩu>"},
         {"command": "setport", "description": "📌 Đổi cổng SSH cố định: /setport <10000-60000>"},
+        {"command": "sethf", "description": "🤗 Gắn Hugging Face Token cá nhân để backup: /sethf <hf_token>"},
         {"command": "status", "description": "📊 Xem GPU, RAM, Disk & trạng thái VPS"},
         {"command": "deploy", "description": "🚀 Chạy ngầm & tự bật lại sau 12h: /deploy <lệnh>"},
         {"command": "apps", "description": "📋 Xem & quản lý các App đang chạy ngầm"},
@@ -827,14 +882,13 @@ def ssh_exec(result, cmd, timeout=180):
 
 
 def sync_remote(cfg, result, mode="--start-daemon", uid=ADMIN_ID, idx=None):
-    u = get_user_cfg(cfg, uid)
-    nb = get_user_nb(cfg, uid, idx=idx)
-    hf_repo = nb.get("hf_repo") or u.get("hf_repo") or cfg.get("hf_repo")
-    if not result or not cfg.get("hf_token") or not hf_repo:
+    if not result:
         return
+    nb = get_user_nb(cfg, uid, idx=idx)
+    hf_token, hf_repo = _user_hf_credentials(cfg, uid, idx=nb["idx"])
     remote_cfg = json.dumps(
         {
-            "hf_token": cfg["hf_token"],
+            "hf_token": hf_token,
             "hf_repo": hf_repo,
             "telegram_bot_token": cfg.get("telegram_bot_token", ""),
             "telegram_chat_id": str(uid),
@@ -1725,7 +1779,11 @@ def get_vps_status_card(cfg, state, uid=ADMIN_ID, idx=None):
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🔄 <b>Làm mới đường truyền ngầm sau:</b> {rem_ssh} phút <i>(giữ nguyên cổng cố định)</i>\n"
         f"♻️ <b>Reset phiên sau:</b> {rem_ses} phút <i>(chu kỳ {cfg['session_restart_minutes']}p)</i>\n"
-        f"☁️ <b>Kho lưu trữ:</b> <code>{html.escape(nb.get('hf_repo', ''))}</code>"
+        + (
+            f"☁️ <b>Kho lưu trữ:</b> <code>{html.escape(_user_hf_credentials(cfg, uid, idx=nb_idx)[1])}</code>"
+            if _user_hf_credentials(cfg, uid, idx=nb_idx)[0]
+            else "☁️ <b>Kho lưu trữ:</b> ⚠️ <i>Chưa gắn HF Token (gõ <code>/sethf hf_...</code>)</i>"
+        )
     )
 
 
@@ -2263,6 +2321,79 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
                     target_banner + f"✅ <b>Đã lưu cổng SSH cố định mới cho VPS #{target_idx}:</b> <code>bore.pub:{new_port}</code>",
                     chat_id=chat_id,
                 )
+        elif cmd in ("/sethf", "/hf"):
+            cur_tok, cur_repo = _user_hf_credentials(cfg, target_uid, idx=target_idx)
+            if not arg.strip():
+                masked = (cur_tok[:6] + "..." + cur_tok[-4:]) if len(cur_tok) > 10 else ("Đã gắn" if cur_tok else "Chưa gắn")
+                st_line = (
+                    f"✅ Đang dùng: <code>{html.escape(cur_repo)}</code> (Token: <code>{html.escape(masked)}</code>)"
+                    if (cur_tok and cur_repo)
+                    else "⚠️ <b>Chưa gắn Token Hugging Face cá nhân</b>"
+                )
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + "🤗 <b>CÀI ĐẶT HUGGING FACE BACKUP CÁ NHÂN (50GB/FILE)</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    f"• <b>Trạng thái (ID <code>{html.escape(target_uid)}</code>):</b> {st_line}\n\n"
+                    "Mỗi tài khoản sử dụng <b>Token Hugging Face riêng</b> để tự động sao lưu <code>/home/marimo</code> (code, model AI, dữ liệu train) vào repo Private của chính bạn:\n"
+                    "1️⃣ Vào <a href='https://huggingface.co/settings/tokens'>huggingface.co/settings/tokens</a> tạo token quyền <b>Write</b>.\n"
+                    "2️⃣ Gõ lệnh: <code>/sethf hf_xxxx</code> (hoặc <code>/sethf hf_xxxx user/ten-repo</code>)\n"
+                    "3️⃣ Để gỡ token: <code>/sethf off</code>",
+                    chat_id=chat_id,
+                )
+                continue
+            sub_parts = arg.strip().split()
+            if sub_parts[0].lower() in ("off", "clear", "del", "none", "remove"):
+                target_u["hf_token"] = ""
+                if target_uid != ADMIN_ID:
+                    target_u["hf_repo"] = ""
+                    for nb_item in target_u.get("notebooks") or []:
+                        nb_item["hf_repo"] = ""
+                save_config(cfg)
+                for nb_item in target_u.get("notebooks") or []:
+                    st_item = active_sessions.get(session_key(target_uid, nb_item["idx"]))
+                    if st_item and st_item.get("last"):
+                        sync_remote(cfg, st_item["last"], mode="--start-daemon", uid=target_uid, idx=nb_item["idx"])
+                send_telegram(
+                    cfg,
+                    target_banner + "🗑 <b>Đã gỡ Hugging Face Token cá nhân và tắt đồng bộ tự động trên VPS.</b>",
+                    chat_id=chat_id,
+                )
+                continue
+            new_tok = sub_parts[0].strip()
+            custom_repo = sub_parts[1].strip() if len(sub_parts) > 1 else ""
+            ok_hf, hf_info = _verify_hf_token(new_tok)
+            if not ok_hf:
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + f"❌ <b>Token Hugging Face không hợp lệ:</b> <code>{html.escape(hf_info)}</code>\n"
+                    "Hãy kiểm tra lại token (bắt đầu bằng <code>hf_...</code>, quyền <b>Write</b>) tại <a href='https://huggingface.co/settings/tokens'>huggingface.co/settings/tokens</a>.",
+                    chat_id=chat_id,
+                )
+                continue
+            base_repo = custom_repo if ("/" in custom_repo) else f"{hf_info}/molab-backup"
+            target_u["hf_token"] = new_tok
+            target_u["hf_repo"] = base_repo
+            for nb_item in target_u.get("notebooks") or []:
+                i_nb = int(nb_item.get("idx") or 1)
+                nb_item["hf_repo"] = base_repo if i_nb == 1 else f"{base_repo}-vps{i_nb}"
+            save_config(cfg)
+            for nb_item in target_u.get("notebooks") or []:
+                st_item = active_sessions.get(session_key(target_uid, nb_item["idx"]))
+                if st_item and st_item.get("last"):
+                    sync_remote(cfg, st_item["last"], mode="--start-daemon", uid=target_uid, idx=nb_item["idx"])
+            send_telegram(
+                cfg,
+                target_banner
+                + "✅ <b>ĐÃ GẮN HUGGING FACE TOKEN THÀNH CÔNG!</b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"👤 <b>Tài khoản HF:</b> <code>{html.escape(hf_info)}</code>\n"
+                f"☁️ <b>Repo Backup (Private Dataset):</b> <code>{html.escape(target_nb['hf_repo'])}</code>\n\n"
+                "💡 <i>Hệ thống đã kích hoạt đồng bộ ngầm 5 phút/lần & tự khôi phục sau mỗi 12h. Bạn có thể bấm <b>💾 Backup HF ngay</b> (<code>/save</code>) bất cứ lúc nào!</i>",
+                chat_id=chat_id,
+            )
         elif cmd == "/status":
             send_telegram(cfg, target_banner + get_vps_status_card(cfg, state, uid=target_uid, idx=target_idx), chat_id=chat_id)
         elif cmd == "/rotate":
@@ -2314,9 +2445,21 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
             if not state:
                 send_telegram(cfg, target_banner + "⚠️ <b>VPS chưa bật.</b>", chat_id=chat_id)
                 continue
+            hf_tok, hf_repo = _user_hf_credentials(cfg, target_uid, idx=target_idx)
+            if not hf_tok or not hf_repo:
+                send_telegram(
+                    cfg,
+                    target_banner
+                    + "⚠️ <b>Bạn chưa gắn Hugging Face Token cá nhân để backup dữ liệu!</b>\n"
+                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                    "1️⃣ Vào <a href='https://huggingface.co/settings/tokens'>huggingface.co/settings/tokens</a> tạo token quyền <b>Write</b>.\n"
+                    "2️⃣ Gõ lệnh: <code>/sethf hf_xxxx</code> rồi bấm lại <code>/save</code>.",
+                    chat_id=chat_id,
+                )
+                continue
             send_telegram(
                 cfg,
-                target_banner + "⏳ <b>Đang đồng bộ <code>/home/marimo</code> lên Hugging Face...</b>",
+                target_banner + f"⏳ <b>Đang đồng bộ <code>/home/marimo</code> lên <code>{html.escape(hf_repo)}</code>...</b>",
                 chat_id=chat_id,
                 menu=False,
             )

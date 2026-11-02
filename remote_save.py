@@ -1143,6 +1143,8 @@ def restore(cfg):
     install_hooks()
     if MARKER.exists():
         return
+    if not cfg.get("hf_token") or not cfg.get("hf_repo"):
+        return
     api = HfApi(token=cfg["hf_token"])
     api.create_repo(
         repo_id=cfg["hf_repo"], repo_type="dataset", private=True, exist_ok=True
@@ -1162,6 +1164,9 @@ def restore(cfg):
 def push(cfg, settle_sec=0):
     record_apt()
     backup_custom_systemd()
+    if not cfg.get("hf_token") or not cfg.get("hf_repo"):
+        print("⚠️ Chưa gắn Hugging Face Token cá nhân. Gõ /sethf <hf_token> trên bot Telegram để bật backup tự động.", flush=True)
+        return
     now = time.time()
     large_ignores = []
     for root, dirs, files in os.walk(WORK_DIR):
@@ -1210,6 +1215,8 @@ def daemon():
         time.sleep(300)
         try:
             cfg = load_cfg()
+            if not cfg.get("hf_token") or not cfg.get("hf_repo"):
+                continue
             cur = scan_state()
             if cur and cur != last:
                 push(cfg, settle_sec=45)
@@ -1221,6 +1228,17 @@ def daemon():
 def start_daemon():
     install_hooks()
     sync_apps_and_systemd(restart_all=False)
+    cfg = load_cfg()
+    if not cfg.get("hf_token") or not cfg.get("hf_repo"):
+        if PID_FILE.exists():
+            try:
+                pid = int(PID_FILE.read_text(encoding="utf-8").strip())
+                os.kill(pid, signal.SIGTERM)
+            except Exception:
+                pass
+            PID_FILE.unlink(missing_ok=True)
+        subprocess.call(["pkill", "-f", "/usr/local/bin/save --daemon"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return
     if PID_FILE.exists():
         try:
             pid = int(PID_FILE.read_text(encoding="utf-8").strip())
