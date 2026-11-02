@@ -11,6 +11,33 @@ import time
 import urllib.request
 from pathlib import Path
 
+def _ensure_py_deps():
+    for py in dict.fromkeys([sys.executable, "/tmp/uv-venv/bin/python3"]):
+        if not Path(py).exists():
+            continue
+        rc = subprocess.call(
+            [py, "-c", "import pinggy, huggingface_hub, cryptography"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+        if rc != 0:
+            subprocess.run(
+                [
+                    "/usr/local/bin/uv",
+                    "pip",
+                    "install",
+                    "--python",
+                    py,
+                    "-q",
+                    "pinggy",
+                    "huggingface_hub",
+                    "cryptography",
+                ],
+                check=False,
+            )
+
+
+_ensure_py_deps()
 import pinggy
 
 USER = "molab"

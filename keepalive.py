@@ -865,9 +865,10 @@ def login(cfg):
 
 
 def replace_cell_code(page, code_str):
-    frame = wait_editor_frame(page, timeout=60)
+    frame = wait_editor_frame(page, timeout=180)
     if frame is None:
         return False
+    take_over(page)
     editor = find_ssh_cell(page) or frame.locator(".cm-content").first
     updated = editor.evaluate(
         """(el, code) => {
@@ -912,12 +913,13 @@ def ensure_static_cell_code(page, cfg, uid, idx=None):
     nb = get_user_nb(cfg, uid, idx=idx)
     port = int(nb.get("static_port") or _default_port_for_uid(uid))
     pw = str(nb.get("static_password") or f"molab{str(uid)[-4:]}")
-    wait_editor_frame(page, timeout=60)
+    wait_editor_frame(page, timeout=180)
     take_over(page)
     editor = find_ssh_cell(page)
     cur_code = get_editor_code(editor) if editor is not None else ""
     if (
         "_start_pinggy_subprocess" in cur_code
+        and "_ensure_py_deps" in cur_code
         and "sys.path[:]" in cur_code
         and f"STATIC_PORT = {port}" in cur_code
         and f"STATIC_PASSWORD = {json.dumps(pw)}" in cur_code
@@ -1333,8 +1335,8 @@ def provision_or_start_user_vps(
         page = (ctx.pages[0] if (created_ctx and ctx.pages) else ctx.new_page())
         need_provision = force_new_notebook or not nb.get("notebook_url")
         if need_provision:
-            page.goto(cfg["notebook_url"], wait_until="domcontentloaded", timeout=120000)
-            page.wait_for_timeout(8000)
+            page.goto("https://molab.marimo.io/notebooks", wait_until="domcontentloaded", timeout=90000)
+            page.wait_for_timeout(6000)
             body = page.inner_text("body")
             if "/sign-in" in page.url or "Sign in to marimo" in body:
                 u["logged_in"] = False
@@ -1348,22 +1350,18 @@ def provision_or_start_user_vps(
                     "⚠️ <b>Phiên đăng nhập Molab đã hết hạn.</b>\n"
                     "Hãy liên kết lại bằng lệnh: <code>/login email@gmail.com</code>",
                 )
-            dup_btn = page.locator(
-                "button[title='Duplicate notebook'], button:has-text('Duplicate'), button:has-text('Fork')"
+            create_btn = page.locator(
+                "button:has-text('Create a notebook'), button:has-text('New notebook'), button[title='Duplicate notebook']"
             ).first
-            if not dup_btn.count():
-                page.goto("https://molab.marimo.io/notebooks", wait_until="domcontentloaded", timeout=60000)
-                page.wait_for_timeout(5000)
-                dup_btn = page.locator("button:has-text('Create a notebook')").first
-            if not dup_btn.count():
+            if not create_btn.count():
                 if created_ctx:
                     ctx.close()
                 else:
                     page.close()
-                return False, "❌ <b>Không tìm thấy nút Fork / Duplicate / Create notebook trên Molab.</b>"
+                return False, "❌ <b>Không tìm thấy nút Create a notebook trên Molab.</b>"
             old_url = page.url.split("?")[0]
-            dup_btn.click()
-            deadline = time.time() + 45
+            create_btn.click()
+            deadline = time.time() + 60
             while time.time() < deadline:
                 page.wait_for_timeout(2000)
                 cur_url = page.url.split("?")[0]
@@ -2519,6 +2517,28 @@ def session(cfg):
             )
             if not ok:
                 raise RuntimeError(err)
+
+            for uid in get_allowed_ids(cfg):
+                if str(uid) == ADMIN_ID:
+                    continue
+                u_cfg = get_user_cfg(cfg, uid)
+                if not u_cfg.get("logged_in"):
+                    continue
+                for nb_item in u_cfg.get("notebooks") or []:
+                    if nb_item.get("notebook_url"):
+                        try:
+                            provision_or_start_user_vps(
+                                playwright,
+                                cfg,
+                                uid,
+                                active_sessions,
+                                pending_logins,
+                                idx=nb_item["idx"],
+                                force_new_notebook=False,
+                                notify_chat_id=str(uid),
+                            )
+                        except Exception as exc:
+                            logging.warning("Không tự bật được VPS [%s#%s]: %s", uid, nb_item["idx"], exc)
 
             while True:
                 time.sleep(2)
