@@ -427,7 +427,7 @@ def tunnel_alive(result):
     return False
 
 
-def ensure_running(page, timeout=240, attempts=3, force_rerun=False):
+def ensure_running(page, timeout=90, attempts=2, force_rerun=False):
     if not force_rerun and wait_editor_frame(page, timeout=60) is not None:
         page.wait_for_timeout(5000)
         take_over(page)
@@ -3109,6 +3109,30 @@ def session(cfg, max_runtime_minutes=0):
         pending_logins = {}
         admin_state = {"target": ADMIN_ID}
         try:
+            # Ưu tiên bật VPS của Member trước để dịch vụ của thành viên không bị trễ do Admin
+            for uid in get_allowed_ids(cfg):
+                if str(uid) == ADMIN_ID:
+                    continue
+                u_cfg = get_user_cfg(cfg, uid)
+                if not u_cfg.get("logged_in"):
+                    continue
+                for nb_item in u_cfg.get("notebooks") or []:
+                    if nb_item.get("notebook_url"):
+                        try:
+                            provision_or_start_user_vps(
+                                playwright,
+                                cfg,
+                                uid,
+                                active_sessions,
+                                pending_logins,
+                                idx=nb_item["idx"],
+                                force_new_notebook=False,
+                                notify_chat_id=str(uid),
+                                silent_if_unchanged=silent_boot,
+                            )
+                        except Exception as exc:
+                            logging.warning("Không tự bật được VPS [%s#%s]: %s", uid, nb_item["idx"], exc)
+
             admin_u = get_user_cfg(cfg, ADMIN_ID)
             for nb_item in admin_u.get("notebooks") or [{"idx": 1, "notebook_url": cfg.get("notebook_url")}]:
                 if nb_item.get("notebook_url") or int(nb_item.get("idx", 1)) == 1:
@@ -3139,29 +3163,6 @@ def session(cfg, max_runtime_minutes=0):
                             logging.warning("Không khởi động được Admin VPS #%s: %s", nb_item.get("idx", 1), err)
                     except Exception as exc:
                         logging.warning("Lỗi khởi động Admin VPS #%s: %s", nb_item.get("idx", 1), exc)
-
-            for uid in get_allowed_ids(cfg):
-                if str(uid) == ADMIN_ID:
-                    continue
-                u_cfg = get_user_cfg(cfg, uid)
-                if not u_cfg.get("logged_in"):
-                    continue
-                for nb_item in u_cfg.get("notebooks") or []:
-                    if nb_item.get("notebook_url"):
-                        try:
-                            provision_or_start_user_vps(
-                                playwright,
-                                cfg,
-                                uid,
-                                active_sessions,
-                                pending_logins,
-                                idx=nb_item["idx"],
-                                force_new_notebook=False,
-                                notify_chat_id=str(uid),
-                                silent_if_unchanged=silent_boot,
-                            )
-                        except Exception as exc:
-                            logging.warning("Không tự bật được VPS [%s#%s]: %s", uid, nb_item["idx"], exc)
 
             while True:
                 time.sleep(0.3)
