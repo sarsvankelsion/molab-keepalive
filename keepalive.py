@@ -388,12 +388,12 @@ def run_cell(page, timeout=240):
 
 
 def take_over(page):
-    """Molab chỉ cho 1 writer; reader phải bấm Take over mới chạy được cell."""
+    """Molab chỉ cho 1 writer; reader phải bấm Take over hoặc Run or Edit mới chạy được cell."""
     for frame in page.frames:
         try:
-            button = frame.get_by_role("button", name=re.compile("take over", re.I))
+            button = frame.get_by_role("button", name=re.compile(r"take over|run or edit", re.I))
             if button.count() and button.first.is_visible():
-                logging.info("Bấm Take over để giành quyền writer")
+                logging.info("Bấm %s để giành quyền writer", button.first.inner_text())
                 button.first.click()
                 page.wait_for_timeout(3000)
                 return True
@@ -1842,6 +1842,31 @@ def provision_or_start_user_vps(
         else:
             page.goto(nb["notebook_url"], wait_until="domcontentloaded", timeout=120000)
             page.wait_for_timeout(5000)
+            body = page.inner_text("body")
+            if "restricted because it violated our acceptable use policy" in body or "acceptable use policy" in body:
+                u["logged_in"] = False
+                save_config(cfg)
+                if created_ctx:
+                    ctx.close()
+                else:
+                    page.close()
+                return (
+                    False,
+                    "⚠️ <b>Tài khoản Molab đã bị hạn chế (acceptable use policy).</b>\n"
+                    "Vui lòng liên kết tài khoản Molab mới bằng lệnh: <code>/login email_moi@gmail.com</code>",
+                )
+            if "/sign-in" in page.url or "Sign in to marimo" in body:
+                u["logged_in"] = False
+                save_config(cfg)
+                if created_ctx:
+                    ctx.close()
+                else:
+                    page.close()
+                return (
+                    False,
+                    "⚠️ <b>Phiên đăng nhập Molab đã hết hạn.</b>\n"
+                    "Hãy liên kết lại bằng lệnh: <code>/login email@gmail.com</code>",
+                )
             ensure_gpu_compute(page)
             code_updated = ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
 
