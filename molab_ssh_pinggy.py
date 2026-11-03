@@ -138,7 +138,40 @@ def _setup_sshd_and_systemd(password, port_seed):
         check=True,
     )
 
-    path_line = f"PATH={os.environ.get('PATH', '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')}\n"
+    # Tự động liên kết CUDA Toolkit & nvcc vào PATH hệ thống
+    cu13_bin = Path("/usr/local/lib/python3.13/site-packages/nvidia/cu13/bin")
+    if cu13_bin.exists():
+        cuda_home = Path("/usr/local/cuda")
+        if not cuda_home.exists():
+            try:
+                cuda_home.symlink_to(cu13_bin.parent)
+            except Exception:
+                pass
+        for b in cu13_bin.glob("*"):
+            if b.is_file():
+                dest = Path("/usr/local/bin") / b.name
+                if not dest.exists():
+                    try:
+                        dest.symlink_to(b)
+                    except Exception:
+                        pass
+        prof_d = Path("/etc/profile.d/cuda.sh")
+        prof_d.parent.mkdir(parents=True, exist_ok=True)
+        prof_d.write_text(
+            "export CUDA_HOME=/usr/local/cuda\n"
+            "export PATH=/usr/local/cuda/bin:$PATH\n"
+            "export LD_LIBRARY_PATH=/usr/local/cuda/lib:$LD_LIBRARY_PATH\n",
+            encoding="utf-8",
+        )
+        for rc in (Path("/root/.bashrc"), Path("/home/marimo/.bashrc")):
+            if rc.exists() and "CUDA_HOME" not in rc.read_text(encoding="utf-8", errors="ignore"):
+                try:
+                    with rc.open("a", encoding="utf-8") as f:
+                        f.write("\n[ -f /etc/profile.d/cuda.sh ] && source /etc/profile.d/cuda.sh\n")
+                except Exception:
+                    pass
+
+    path_line = f"PATH=/usr/local/cuda/bin:{os.environ.get('PATH', '/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin')}\n"
     for env_file in (Path("/home/marimo/.ssh/environment"), Path("/root/.ssh/environment")):
         env_file.write_text(path_line, encoding="utf-8")
         env_file.chmod(0o600)

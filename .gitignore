@@ -2,6 +2,7 @@ profile/
 profiles/
 controller_state/
 config.json
+molab_key*
 last_ssh*.txt
 *.log
 *.tmp

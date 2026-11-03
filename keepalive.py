@@ -3150,7 +3150,7 @@ def session(cfg, max_runtime_minutes=0):
                             logging.warning("Không tự bật được VPS [%s#%s]: %s", uid, nb_item["idx"], exc)
 
             while True:
-                time.sleep(2)
+                time.sleep(0.3)
                 handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, admin_state)
 
                 for p_uid, p_item in list(pending_logins.items()):
@@ -3180,6 +3180,19 @@ def session(cfg, max_runtime_minutes=0):
                             st["next_heartbeat"] = now + 30
 
                         if now >= st["next_restart"]:
+                            user_busy = False
+                            if st.get("last"):
+                                try:
+                                    out = ssh_exec(st["last"], "who | grep pts || ps -ef | grep -E 'sshd:.*pts/'", timeout=4)
+                                    if out and "pts/" in out:
+                                        user_busy = True
+                                except Exception:
+                                    pass
+                            if user_busy:
+                                logging.info("Người dùng đang thao tác SSH trên [%s#%s], hoãn reload 12h thêm 30 phút", uid, nb_idx)
+                                st["next_restart"] = now + 1800
+                                continue
+
                             logging.info("Reload notebook [%s#%s] (session 12h)", uid, nb_idx)
                             sync_remote(cfg, st["last"], mode="--push", uid=uid, idx=nb_idx)
                             page.reload(wait_until="domcontentloaded", timeout=120000)
@@ -3217,6 +3230,11 @@ def session(cfg, max_runtime_minutes=0):
                                     stop_bore_bridge(st)
                                     st["last"] = attach_bore_bridge(cfg, uid, st["raw_last"], st, idx=nb_idx)
                                 else:
+                                    scraped = scrape(page)
+                                    if scraped and tunnel_alive(scraped):
+                                        st["raw_last"] = scraped
+                                        st["last"] = attach_bore_bridge(cfg, uid, scraped, st, idx=nb_idx)
+                                        continue
                                     logging.warning("Phát hiện tunnel [%s#%s] mất kết nối sớm, tự động khôi phục...", uid, nb_idx)
                                     ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
                                     raw_new = ensure_running(page, force_rerun=True)
@@ -3230,6 +3248,10 @@ def session(cfg, max_runtime_minutes=0):
                             poll_remote_pinggy_url(st)
                             if st.get("last") and tunnel_alive(st["last"]):
                                 logging.info("Đường truyền nền [%s#%s] đã tự xoay vòng ngầm, giữ nguyên phiên SSH", uid, nb_idx)
+                                continue
+                            scraped = scrape(page)
+                            if scraped and tunnel_alive(scraped):
+                                st["last"] = attach_bore_bridge(cfg, uid, scraped, st, idx=nb_idx)
                                 continue
                             logging.info("Làm mới ngầm đường truyền nền [%s#%s] (giữ nguyên cổng cố định bore.pub)", uid, nb_idx)
                             ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
