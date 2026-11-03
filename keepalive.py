@@ -35,9 +35,100 @@ from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent
 CONFIG_PATH = ROOT / "config.json"
+STATE_DIR = ROOT / "controller_state"
+DEFAULT_STATE_REPO = "lesslosster/molab-controller-state"
+_STATE_PUSH_LOCK = threading.Lock()
+
+
+def _get_state_hf_creds(cfg=None):
+    tok = (os.environ.get("HF_STATE_TOKEN") or "").strip()
+    repo = (os.environ.get("HF_STATE_REPO") or DEFAULT_STATE_REPO).strip()
+    if not tok and cfg and cfg.get("hf_token"):
+        tok = str(cfg["hf_token"]).strip()
+    if not tok and CONFIG_PATH.exists():
+        try:
+            raw = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
+            tok = str(raw.get("hf_token") or "").strip()
+        except Exception:
+            pass
+    return tok, repo
+
+
+def pull_controller_state():
+    tok, repo = _get_state_hf_creds()
+    if not tok or not repo:
+        return False
+    if CONFIG_PATH.exists() and os.environ.get("MOLAB_CLOUD_CONTROLLER") != "1":
+        return False
+    try:
+        import zlib
+        from huggingface_hub import hf_hub_download
+
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        bin_path = hf_hub_download(
+            repo_id=repo,
+            repo_type="dataset",
+            filename="state.bin",
+            local_dir=str(STATE_DIR),
+            token=tok,
+        )
+        raw_bytes = zlib.decompress(base64.b64decode(Path(bin_path).read_bytes()))
+        bundle = json.loads(raw_bytes.decode("utf-8"))
+        for fname, content in (bundle.get("files") or {}).items():
+            if fname == "config.json":
+                CONFIG_PATH.write_text(content, encoding="utf-8")
+                (STATE_DIR / "config.json").write_text(content, encoding="utf-8")
+            elif fname.startswith("storage_state_") and fname.endswith(".json"):
+                (STATE_DIR / fname).write_text(content, encoding="utf-8")
+        if CONFIG_PATH.exists():
+            logging.info("Đã tải trạng thái Controller từ HF Private Dataset (%s)", repo)
+            return True
+    except Exception as exc:
+        logging.warning("Không tải được trạng thái Controller từ HF (%s): %s", repo, exc)
+    return False
+
+
+def _do_push_controller_state(tok, repo):
+    with _STATE_PUSH_LOCK:
+        try:
+            import zlib
+            from huggingface_hub import HfApi
+
+            STATE_DIR.mkdir(parents=True, exist_ok=True)
+            files_map = {}
+            if CONFIG_PATH.exists():
+                cfg_txt = CONFIG_PATH.read_text(encoding="utf-8-sig")
+                files_map["config.json"] = cfg_txt
+            for st_f in STATE_DIR.glob("storage_state_*.json"):
+                files_map[st_f.name] = st_f.read_text(encoding="utf-8")
+            payload = base64.b64encode(zlib.compress(json.dumps({"files": files_map}).encode("utf-8"), 9))
+            bin_file = STATE_DIR / "state.bin"
+            bin_file.write_bytes(payload)
+            api = HfApi(token=tok)
+            api.create_repo(repo_id=repo, repo_type="dataset", private=True, exist_ok=True)
+            api.upload_file(
+                path_or_fileobj=str(bin_file),
+                path_in_repo="state.bin",
+                repo_id=repo,
+                repo_type="dataset",
+                commit_message=f"controller state {time.strftime('%Y-%m-%d %H:%M:%S')}",
+            )
+        except Exception as exc:
+            logging.warning("Không lưu được trạng thái Controller lên HF (%s): %s", repo, exc)
+
+
+def push_controller_state(cfg=None, async_push=True):
+    tok, repo = _get_state_hf_creds(cfg)
+    if not tok or not repo:
+        return
+    if async_push:
+        threading.Thread(target=_do_push_controller_state, args=(tok, repo), daemon=True).start()
+    else:
+        _do_push_controller_state(tok, repo)
 
 
 def load_config():
+    pull_controller_state()
     if not CONFIG_PATH.exists():
         sys.exit(f"Thiếu {CONFIG_PATH}. Copy config.example.json -> config.json rồi điền notebook_url.")
     cfg = json.loads(CONFIG_PATH.read_text(encoding="utf-8-sig"))
@@ -515,6 +606,7 @@ def save_config(cfg):
     CONFIG_PATH.write_text(
         json.dumps(cfg, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
+    push_controller_state(cfg, async_push=True)
 
 
 def _default_port_for_uid(uid):
@@ -913,7 +1005,7 @@ def sync_remote(cfg, result, mode="--start-daemon", uid=ADMIN_ID, idx=None):
         return f"Lỗi: {exc}"
 
 
-def publish(cfg, result, state=None, uid=ADMIN_ID, idx=None, notify_chat_id=None):
+def publish(cfg, result, state=None, uid=ADMIN_ID, idx=None, notify_chat_id=None, silent_if_unchanged=False):
     u = get_user_cfg(cfg, uid)
     nb = get_user_nb(cfg, uid, idx=idx or (state.get("idx") if state else None))
     nb_idx = nb["idx"]
@@ -925,23 +1017,69 @@ def publish(cfg, result, state=None, uid=ADMIN_ID, idx=None, notify_chat_id=None
     tmp.write_text(text, encoding="utf-8")
     tmp.replace(path)
     logging.info("Địa chỉ mới [%s#%s]:\n%s", uid, nb_idx, text.strip())
-    card = format_ssh_card(cfg, result, state, uid=uid, idx=nb_idx)
-    send_telegram(cfg, card, chat_id=uid, effect_id=EFFECT_FIRE)
-    if notify_chat_id and str(notify_chat_id) != str(uid):
-        send_telegram(cfg, card, chat_id=notify_chat_id, effect_id=EFFECT_FIRE)
+    sig = f"{ssh_line}|{password}"
+    prev_sig = nb.get("last_announced_ssh")
+    if prev_sig != sig:
+        nb["last_announced_ssh"] = sig
+        save_config(cfg)
+    if not (silent_if_unchanged and prev_sig == sig):
+        card = format_ssh_card(cfg, result, state, uid=uid, idx=nb_idx)
+        send_telegram(cfg, card, chat_id=uid, effect_id=EFFECT_FIRE)
+        if notify_chat_id and str(notify_chat_id) != str(uid):
+            send_telegram(cfg, card, chat_id=notify_chat_id, effect_id=EFFECT_FIRE)
     sync_remote(cfg, result, mode="--start-daemon", uid=uid, idx=nb_idx)
 
 
-def open_context(playwright, cfg, headless, profile_dir=None):
+def _infer_uid_from_profile(cfg, profile_dir, uid=None):
+    if uid:
+        return str(uid).strip()
+    if not profile_dir or profile_dir == cfg.get("profile_dir", "profile"):
+        return ADMIN_ID
+    return Path(str(profile_dir)).name
+
+
+def save_context_storage_state(ctx, uid, cfg=None):
+    if ctx is None or not uid:
+        return
+    try:
+        STATE_DIR.mkdir(parents=True, exist_ok=True)
+        st_path = STATE_DIR / f"storage_state_{str(uid).strip()}.json"
+        ctx.storage_state(path=str(st_path))
+        push_controller_state(cfg, async_push=True)
+    except Exception as exc:
+        logging.warning("Không lưu được storage_state cho [%s]: %s", uid, exc)
+
+
+def open_context(playwright, cfg, headless, profile_dir=None, uid=None):
+    uid_str = _infer_uid_from_profile(cfg, profile_dir, uid=uid)
     profile = ROOT / (profile_dir or cfg["profile_dir"])
     profile.mkdir(parents=True, exist_ok=True)
-    return playwright.chromium.launch_persistent_context(
+    for lock in profile.glob("Singleton*"):
+        try:
+            lock.unlink(missing_ok=True)
+        except Exception:
+            pass
+    ctx = playwright.chromium.launch_persistent_context(
         user_data_dir=str(profile),
         headless=headless,
         viewport={"width": 1400, "height": 900},
-        args=["--disable-blink-features=AutomationControlled"],
+        args=[
+            "--disable-blink-features=AutomationControlled",
+            "--no-sandbox",
+            "--disable-dev-shm-usage",
+        ],
         ignore_default_args=["--enable-automation"],
     )
+    st_file = STATE_DIR / f"storage_state_{uid_str}.json"
+    if st_file.exists():
+        try:
+            st_data = json.loads(st_file.read_text(encoding="utf-8"))
+            cookies = st_data.get("cookies") or []
+            if cookies:
+                ctx.add_cookies(cookies)
+        except Exception as exc:
+            logging.warning("Không nạp được storage_state cho [%s]: %s", uid_str, exc)
+    return ctx
 
 
 def has_editor(page):
@@ -1438,7 +1576,7 @@ def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_
     stop_user_vps(uid, active_sessions)
     close_pending_login(uid, pending_logins)
     u = get_user_cfg(cfg, uid)
-    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"])
+    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"], uid=uid)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     try:
         page.goto("https://molab.marimo.io/sign-in", wait_until="networkidle", timeout=60000)
@@ -1446,6 +1584,7 @@ def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_
         if "/sign-in" not in page.url:
             u["logged_in"] = True
             u["email"] = email
+            save_context_storage_state(ctx, uid, cfg)
             save_config(cfg)
             ctx.close()
             return True, f"✅ Tài khoản Molab (<code>{html.escape(email)}</code>) đã được đăng nhập sẵn! Bấm <b>🚀 Bật VPS hiện tại</b> để khởi tạo máy."
@@ -1510,6 +1649,7 @@ def verify_molab_email_code(cfg, uid, code, pending_logins):
                 u = get_user_cfg(cfg, uid)
                 u["logged_in"] = True
                 u["email"] = email
+                save_context_storage_state(item.get("context"), uid, cfg)
                 save_config(cfg)
                 close_pending_login(uid, pending_logins)
                 return (
@@ -1530,7 +1670,7 @@ def link_molab_cookie(playwright, cfg, uid, cookie_val, pending_logins, active_s
     stop_user_vps(uid, active_sessions)
     close_pending_login(uid, pending_logins)
     u = get_user_cfg(cfg, uid)
-    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"])
+    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"], uid=uid)
     try:
         ctx.add_cookies(
             [
@@ -1553,6 +1693,7 @@ def link_molab_cookie(playwright, cfg, uid, cookie_val, pending_logins, active_s
             u["logged_in"] = True
             if not u.get("email"):
                 u["email"] = "Google/Cookie Linked"
+            save_context_storage_state(ctx, uid, cfg)
             save_config(cfg)
             return (
                 True,
@@ -1600,7 +1741,15 @@ def stop_user_vps(uid, active_sessions, idx=None):
 
 
 def provision_or_start_user_vps(
-    playwright, cfg, uid, active_sessions, pending_logins, idx=None, force_new_notebook=False, notify_chat_id=None
+    playwright,
+    cfg,
+    uid,
+    active_sessions,
+    pending_logins,
+    idx=None,
+    force_new_notebook=False,
+    notify_chat_id=None,
+    silent_if_unchanged=False,
 ):
     uid = str(uid)
     u = get_user_cfg(cfg, uid)
@@ -1629,7 +1778,7 @@ def provision_or_start_user_vps(
     shared_ctx = _find_user_context(uid, active_sessions)
     created_ctx = False
     if shared_ctx is None:
-        ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"])
+        ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"], uid=uid)
         created_ctx = True
     else:
         ctx = shared_ctx
@@ -1706,6 +1855,7 @@ def provision_or_start_user_vps(
                 page.close()
             return False, f"❌ <b>Không khởi chạy được cell SSH trên VPS #{nb_idx}.</b>"
 
+        save_context_storage_state(ctx, uid, cfg)
         now = time.monotonic()
         st = {
             "skey": skey,
@@ -1722,7 +1872,15 @@ def provision_or_start_user_vps(
         result = attach_bore_bridge(cfg, uid, raw_result, st, idx=nb_idx)
         st["last"] = result
         active_sessions[skey] = st
-        publish(cfg, result, st, uid=uid, idx=nb_idx, notify_chat_id=notify_chat_id)
+        publish(
+            cfg,
+            result,
+            st,
+            uid=uid,
+            idx=nb_idx,
+            notify_chat_id=notify_chat_id,
+            silent_if_unchanged=silent_if_unchanged,
+        )
         return True, f"✅ <b>VPS #{nb_idx} của ID <code>{html.escape(uid)}</code> đã sẵn sàng!</b>"
     except Exception as exc:
         try:
@@ -2944,17 +3102,29 @@ def poll_remote_pinggy_url(st):
         return False
 
 
-def session(cfg):
+def session(cfg, max_runtime_minutes=0):
+    stop_at = (time.monotonic() + float(max_runtime_minutes) * 60.0) if max_runtime_minutes and max_runtime_minutes > 0 else 0
+    silent_boot = os.environ.get("MOLAB_CLOUD_CONTROLLER") == "1"
     with sync_playwright() as playwright:
         active_sessions = {}
         pending_logins = {}
         admin_state = {"target": ADMIN_ID}
         try:
-            ok, err = provision_or_start_user_vps(
-                playwright, cfg, ADMIN_ID, active_sessions, pending_logins, idx=1, force_new_notebook=False
-            )
-            if not ok:
-                raise RuntimeError(err)
+            admin_u = get_user_cfg(cfg, ADMIN_ID)
+            for nb_item in admin_u.get("notebooks") or [{"idx": 1, "notebook_url": cfg.get("notebook_url")}]:
+                if nb_item.get("notebook_url") or int(nb_item.get("idx", 1)) == 1:
+                    ok, err = provision_or_start_user_vps(
+                        playwright,
+                        cfg,
+                        ADMIN_ID,
+                        active_sessions,
+                        pending_logins,
+                        idx=nb_item.get("idx", 1),
+                        force_new_notebook=False,
+                        silent_if_unchanged=silent_boot,
+                    )
+                    if not ok and int(nb_item.get("idx", 1)) == 1:
+                        raise RuntimeError(err)
 
             for uid in get_allowed_ids(cfg):
                 if str(uid) == ADMIN_ID:
@@ -2974,6 +3144,7 @@ def session(cfg):
                                 idx=nb_item["idx"],
                                 force_new_notebook=False,
                                 notify_chat_id=str(uid),
+                                silent_if_unchanged=silent_boot,
                             )
                         except Exception as exc:
                             logging.warning("Không tự bật được VPS [%s#%s]: %s", uid, nb_item["idx"], exc)
@@ -2987,6 +3158,17 @@ def session(cfg):
                         close_pending_login(p_uid, pending_logins)
 
                 now = time.monotonic()
+                if stop_at and now >= stop_at:
+                    logging.info("Đạt giới hạn phiên Cloud (%s phút), đang lưu trạng thái để chuyển ca...", max_runtime_minutes)
+                    seen_uids = set()
+                    for st in list(active_sessions.values()):
+                        u_id = str(st.get("uid", ADMIN_ID))
+                        if u_id not in seen_uids and st.get("context"):
+                            seen_uids.add(u_id)
+                            save_context_storage_state(st["context"], u_id, cfg)
+                    push_controller_state(cfg, async_push=False)
+                    return "MAX_RUNTIME_REACHED"
+
                 for skey, st in list(active_sessions.items()):
                     uid = st.get("uid", ADMIN_ID)
                     nb_idx = st.get("idx", 1)
@@ -3026,13 +3208,22 @@ def session(cfg):
                             if st.get("last") and not tunnel_alive(st["last"]):
                                 poll_remote_pinggy_url(st)
                             if st.get("last") and not tunnel_alive(st["last"]):
-                                logging.warning("Phát hiện tunnel [%s#%s] mất kết nối sớm, tự động khôi phục...", uid, nb_idx)
-                                ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
-                                raw_new = ensure_running(page, force_rerun=True)
-                                if raw_new:
-                                    new = attach_bore_bridge(cfg, uid, raw_new, st, idx=nb_idx)
-                                    st["last"] = new
-                                    st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
+                                if st.get("raw_last") and tunnel_alive(st["raw_last"]):
+                                    logging.info(
+                                        "Đường truyền nền [%s#%s] vẫn sống, kết nối lại cổng cố định bore.pub...",
+                                        uid,
+                                        nb_idx,
+                                    )
+                                    stop_bore_bridge(st)
+                                    st["last"] = attach_bore_bridge(cfg, uid, st["raw_last"], st, idx=nb_idx)
+                                else:
+                                    logging.warning("Phát hiện tunnel [%s#%s] mất kết nối sớm, tự động khôi phục...", uid, nb_idx)
+                                    ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
+                                    raw_new = ensure_running(page, force_rerun=True)
+                                    if raw_new:
+                                        new = attach_bore_bridge(cfg, uid, raw_new, st, idx=nb_idx)
+                                        st["last"] = new
+                                        st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
 
                         if now >= st["next_rerun"]:
                             st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
@@ -3058,6 +3249,7 @@ def session(cfg):
                 stop_user_vps(st.get("uid", ADMIN_ID), active_sessions)
             for uid in list(pending_logins.keys()):
                 close_pending_login(uid, pending_logins)
+            push_controller_state(cfg, async_push=False)
 
 
 def main():
@@ -3071,6 +3263,7 @@ def main():
     parser.add_argument("--login", action="store_true", help="đăng nhập molab một lần")
     parser.add_argument("--once", action="store_true", help="mở, chạy cell, in địa chỉ rồi thoát")
     parser.add_argument("--headful", action="store_true", help="hiện cửa sổ browser")
+    parser.add_argument("--max-runtime-minutes", type=float, default=0, help="tự lưu state và thoát sau N phút (dùng cho Cloud CI)")
     args = parser.parse_args()
 
     setup_logging()
@@ -3101,7 +3294,9 @@ def main():
 
     while True:
         try:
-            session(cfg)
+            rc = session(cfg, max_runtime_minutes=args.max_runtime_minutes)
+            if rc == "MAX_RUNTIME_REACHED":
+                return
         except Exception as exc:
             logging.exception("Session lỗi: %s", exc)
             send_telegram(cfg, f"molab keepalive lỗi: {exc}")

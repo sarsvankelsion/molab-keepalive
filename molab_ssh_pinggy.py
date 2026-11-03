@@ -193,6 +193,7 @@ def _start_pinggy_subprocess(local_port, token):
                     pass
 
     subprocess.run(["pkill", "-9", "-f", "/tmp/molab_pinggy_"], check=False)
+    subprocess.run(["pkill", "-9", "-f", "pinggy"], check=False)
     time.sleep(1.0)
     if url_file.exists():
         url_file.unlink()
@@ -434,6 +435,19 @@ def _serve_relay():
             time.sleep(0.5)
 
 
+def _kill_tun_proc(p):
+    if p is None:
+        return
+    try:
+        os.killpg(p.pid, 9)
+    except Exception:
+        pass
+    try:
+        p.kill()
+    except Exception:
+        pass
+
+
 def _spawn_pinggy_proc():
     prev_ts = 0.0
     if URL_FILE.exists():
@@ -461,10 +475,7 @@ def _spawn_pinggy_proc():
                 pass
         if proc.poll() is not None:
             break
-    try:
-        proc.kill()
-    except Exception:
-        pass
+    _kill_tun_proc(proc)
     return None
 
 
@@ -480,10 +491,7 @@ while True:
     kept = []
     for exp, op in old_procs:
         if now >= exp:
-            try:
-                op.kill()
-            except Exception:
-                pass
+            _kill_tun_proc(op)
         else:
             kept.append((exp, op))
     old_procs = kept
@@ -501,10 +509,7 @@ while True:
             time.sleep(1.0)
             new_p = _spawn_pinggy_proc()
         if new_p is None and cur_proc is not None and (forced or cur_proc.poll() is not None or now - last_rot >= 3200):
-            try:
-                cur_proc.kill()
-            except Exception:
-                pass
+            _kill_tun_proc(cur_proc)
             time.sleep(1.0)
             new_p = _spawn_pinggy_proc()
             cur_proc = None
