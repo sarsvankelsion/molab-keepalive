@@ -5,10 +5,6 @@ on:
   schedule:
     - cron: "*/30 * * * *"
 
-concurrency:
-  group: molab-cloud-controller
-  cancel-in-progress: true
-
 permissions:
   actions: write
   contents: read
@@ -71,7 +67,7 @@ jobs:
           python keepalive.py --max-runtime-minutes 320
 
       - name: Trigger next 24/7 shift
-        if: always() && steps.guard.outputs.skip != 'true'
+        if: !cancelled() && steps.guard.outputs.skip != 'true'
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           REPO: ${{ github.repository }}
