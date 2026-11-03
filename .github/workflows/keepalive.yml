@@ -67,7 +67,7 @@ jobs:
           python keepalive.py --max-runtime-minutes 320
 
       - name: Trigger next 24/7 shift
-        if: !cancelled() && steps.guard.outputs.skip != 'true'
+        if: "${{ !cancelled() && steps.guard.outputs.skip != 'true' }}"
         env:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           REPO: ${{ github.repository }}
