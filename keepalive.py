@@ -3112,18 +3112,33 @@ def session(cfg, max_runtime_minutes=0):
             admin_u = get_user_cfg(cfg, ADMIN_ID)
             for nb_item in admin_u.get("notebooks") or [{"idx": 1, "notebook_url": cfg.get("notebook_url")}]:
                 if nb_item.get("notebook_url") or int(nb_item.get("idx", 1)) == 1:
-                    ok, err = provision_or_start_user_vps(
-                        playwright,
-                        cfg,
-                        ADMIN_ID,
-                        active_sessions,
-                        pending_logins,
-                        idx=nb_item.get("idx", 1),
-                        force_new_notebook=False,
-                        silent_if_unchanged=silent_boot,
-                    )
-                    if not ok and int(nb_item.get("idx", 1)) == 1:
-                        raise RuntimeError(err)
+                    try:
+                        ok, err = provision_or_start_user_vps(
+                            playwright,
+                            cfg,
+                            ADMIN_ID,
+                            active_sessions,
+                            pending_logins,
+                            idx=nb_item.get("idx", 1),
+                            force_new_notebook=False,
+                            silent_if_unchanged=silent_boot,
+                        )
+                        if not ok and int(nb_item.get("idx", 1)) == 1 and nb_item.get("notebook_url"):
+                            logging.info("Admin VPS #1 không chạy được trên URL cũ, tự động khởi tạo notebook mới...")
+                            ok, err = provision_or_start_user_vps(
+                                playwright,
+                                cfg,
+                                ADMIN_ID,
+                                active_sessions,
+                                pending_logins,
+                                idx=1,
+                                force_new_notebook=True,
+                                silent_if_unchanged=silent_boot,
+                            )
+                        if not ok:
+                            logging.warning("Không khởi động được Admin VPS #%s: %s", nb_item.get("idx", 1), err)
+                    except Exception as exc:
+                        logging.warning("Lỗi khởi động Admin VPS #%s: %s", nb_item.get("idx", 1), exc)
 
             for uid in get_allowed_ids(cfg):
                 if str(uid) == ADMIN_ID:

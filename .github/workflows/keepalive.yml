@@ -5,6 +5,10 @@ on:
   schedule:
     - cron: "*/30 * * * *"
 
+concurrency:
+  group: molab-cloud-controller
+  cancel-in-progress: true
+
 permissions:
   actions: write
   contents: read
