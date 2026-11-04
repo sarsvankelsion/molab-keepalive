@@ -611,6 +611,7 @@ def get_bot_help(is_admin=False):
         "• <code>/wings</code> — Quản lý Pterodactyl Wings & Docker Shim\n\n"
         "⚙️ <b>Hệ thống</b>\n"
         "• <code>/status</code> — Kiểm tra GPU, Uptime | <code>/restart</code> — Khởi động lại\n"
+        "• <code>/sleep &lt;giờ&gt;</code> — Tắt đi ngủ tránh AUP | <code>/wake</code> — Đánh thức VPS\n"
         "• <code>/login email@gmail.com</code> | <code>/code 123456</code> — Liên kết Molab\n"
     )
     if is_admin:
@@ -662,6 +663,27 @@ def _alloc_nb_port(cfg, uid, idx):
         if cand > 60000:
             cand = 20000
     return cand
+
+
+def parse_sleep_duration(arg):
+    if not arg or not str(arg).strip():
+        return 8.0
+    try:
+        val = float(str(arg).strip().replace(",", "."))
+        return max(0.5, min(72.0, val))
+    except (ValueError, TypeError):
+        return 8.0
+
+
+def is_user_sleeping(u_cfg, now=None):
+    if not u_cfg:
+        return False, 0.0
+    if now is None:
+        now = time.time()
+    sleep_until = float(u_cfg.get("sleep_until") or 0.0)
+    if sleep_until > now:
+        return True, sleep_until - now
+    return False, 0.0
 
 
 def get_user_cfg(cfg, uid):
@@ -1956,12 +1978,18 @@ def get_vps_status_card(cfg, state, uid=ADMIN_ID, idx=None):
     nb = get_user_nb(cfg, uid, idx=idx or (state.get("idx") if state else None))
     nb_idx = nb["idx"]
     if not state or not state.get("last"):
+        sleeping, rem_sec = is_user_sleeping(u)
+        status_line = (
+            f"💤 <b>Đang ngủ</b> (còn ~<code>{round(rem_sec/3600.0, 1)}h</code> — gõ <code>/wake</code> để đánh thức)"
+            if sleeping
+            else "⚪ Chưa bật (Bấm <b>🚀 Bật VPS hiện tại</b> để chạy)"
+        )
         return (
             "📊 <b>THÔNG SỐ HỆ THỐNG MOLAB VPS</b>\n"
             "━━━━━━━━━━━━━━━━━━━━━━\n"
             f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code>\n"
             f"🖥 <b>Máy VPS:</b> <b>#{nb_idx}</b> / {len(u['notebooks'])} máy (<code>bore.pub:{nb['static_port']}</code>)\n"
-            "📡 <b>Trạng thái:</b> ⚪ Chưa bật (Bấm <b>🚀 Bật VPS hiện tại</b> để chạy)"
+            f"📡 <b>Trạng thái:</b> {status_line}"
         )
     probe = (
         "echo GPU: $(nvidia-smi --query-gpu=name,memory.used,memory.total,utilization.gpu --format=csv,noheader 2>/dev/null || echo 'N/A'); "
@@ -2366,6 +2394,57 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
                 send_telegram(cfg, f"🛑 <b>Đã lưu dữ liệu & tắt VPS #{req_idx} của ID <code>{html.escape(req_uid)}</code>.</b>", chat_id=chat_id)
             else:
                 send_telegram(cfg, f"⚪ <b>VPS #{req_idx} của ID <code>{html.escape(req_uid)}</code> hiện đang tắt.</b>", chat_id=chat_id)
+        elif cmd == "/sleep":
+            dur_h = parse_sleep_duration(arg)
+            req_uid = target_uid if is_admin else chat_id
+            target_u = get_user_cfg(cfg, req_uid)
+            wake_ts = time.time() + dur_h * 3600
+            target_u["sleep_until"] = wake_ts
+            save_config(cfg)
+
+            for nb_item in target_u.get("notebooks") or [{"idx": 1}]:
+                s_idx = nb_item.get("idx", 1)
+                st = active_sessions.get(session_key(req_uid, s_idx))
+                if st and st.get("last"):
+                    sync_remote(cfg, st["last"], mode="--push", uid=req_uid, idx=s_idx)
+                stop_user_vps(req_uid, active_sessions, idx=s_idx)
+
+            wake_time_str = time.strftime("%H:%M:%S %d/%m/%Y", time.localtime(wake_ts))
+            send_telegram(
+                cfg,
+                target_banner
+                + f"💤 <b>ĐÃ KÍCH HOẠT CHẾ ĐỘ NGỦ ({dur_h} GIỜ) CHO ID <code>{html.escape(req_uid)}</code></b>\n"
+                "━━━━━━━━━━━━━━━━━━━━━━\n"
+                f"• VPS đã được lưu dữ liệu & tắt an toàn để tránh Molab quét AUP.\n"
+                f"• Tự động bật lại lúc: <code>{wake_time_str}</code>\n"
+                f"• Muốn dùng sớm hơn? Gõ <code>/wake</code> bất kỳ lúc nào để bật lại ngay!",
+                chat_id=chat_id,
+            )
+        elif cmd == "/wake":
+            req_uid = target_uid if is_admin else chat_id
+            target_u = get_user_cfg(cfg, req_uid)
+            target_u["sleep_until"] = 0
+            save_config(cfg)
+            send_telegram(
+                cfg,
+                target_banner + f"☀️ <b>Đang đánh thức & khởi động lại VPS cho ID <code>{html.escape(req_uid)}</code>...</b>\n<i>Vui lòng đợi khoảng 15–30 giây.</i>",
+                chat_id=chat_id,
+                menu=False,
+            )
+            for nb_item in target_u.get("notebooks") or [{"idx": 1}]:
+                s_idx = nb_item.get("idx", 1)
+                ok, msg_out = provision_or_start_user_vps(
+                    playwright,
+                    cfg,
+                    req_uid,
+                    active_sessions,
+                    pending_logins,
+                    idx=s_idx,
+                    force_new_notebook=False,
+                    notify_chat_id=chat_id,
+                )
+                if not ok:
+                    send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
         elif cmd == "/vps":
             card_text, markup = format_vps_card(cfg, active_sessions, chat_id, target_uid, target_idx, is_admin=is_admin)
             send_telegram(cfg, card_text, chat_id=chat_id, reply_markup=markup)
@@ -3175,6 +3254,10 @@ def session(cfg, max_runtime_minutes=0):
                 u_cfg = get_user_cfg(cfg, uid)
                 if not u_cfg.get("logged_in"):
                     continue
+                sleeping, rem_sec = is_user_sleeping(u_cfg)
+                if sleeping:
+                    logging.info("Bỏ qua bật VPS Member [%s] vì đang ngủ (còn %.1f giờ)", uid, rem_sec / 3600.0)
+                    continue
                 for nb_item in u_cfg.get("notebooks") or []:
                     if nb_item.get("notebook_url"):
                         try:
@@ -3193,35 +3276,39 @@ def session(cfg, max_runtime_minutes=0):
                             logging.warning("Không tự bật được VPS [%s#%s]: %s", uid, nb_item["idx"], exc)
 
             admin_u = get_user_cfg(cfg, ADMIN_ID)
-            for nb_item in admin_u.get("notebooks") or [{"idx": 1, "notebook_url": cfg.get("notebook_url")}]:
-                if nb_item.get("notebook_url") or int(nb_item.get("idx", 1)) == 1:
-                    try:
-                        ok, err = provision_or_start_user_vps(
-                            playwright,
-                            cfg,
-                            ADMIN_ID,
-                            active_sessions,
-                            pending_logins,
-                            idx=nb_item.get("idx", 1),
-                            force_new_notebook=False,
-                            silent_if_unchanged=silent_boot,
-                        )
-                        if not ok and int(nb_item.get("idx", 1)) == 1 and nb_item.get("notebook_url"):
-                            logging.info("Admin VPS #1 không chạy được trên URL cũ, tự động khởi tạo notebook mới...")
+            admin_sleeping, rem_sec = is_user_sleeping(admin_u)
+            if admin_sleeping:
+                logging.info("Bỏ qua bật Admin VPS vì đang ngủ (còn %.1f giờ)", rem_sec / 3600.0)
+            else:
+                for nb_item in admin_u.get("notebooks") or [{"idx": 1, "notebook_url": cfg.get("notebook_url")}]:
+                    if nb_item.get("notebook_url") or int(nb_item.get("idx", 1)) == 1:
+                        try:
                             ok, err = provision_or_start_user_vps(
                                 playwright,
                                 cfg,
                                 ADMIN_ID,
                                 active_sessions,
                                 pending_logins,
-                                idx=1,
-                                force_new_notebook=True,
+                                idx=nb_item.get("idx", 1),
+                                force_new_notebook=False,
                                 silent_if_unchanged=silent_boot,
                             )
-                        if not ok:
-                            logging.warning("Không khởi động được Admin VPS #%s: %s", nb_item.get("idx", 1), err)
-                    except Exception as exc:
-                        logging.warning("Lỗi khởi động Admin VPS #%s: %s", nb_item.get("idx", 1), exc)
+                            if not ok and int(nb_item.get("idx", 1)) == 1 and nb_item.get("notebook_url"):
+                                logging.info("Admin VPS #1 không chạy được trên URL cũ, tự động khởi tạo notebook mới...")
+                                ok, err = provision_or_start_user_vps(
+                                    playwright,
+                                    cfg,
+                                    ADMIN_ID,
+                                    active_sessions,
+                                    pending_logins,
+                                    idx=1,
+                                    force_new_notebook=True,
+                                    silent_if_unchanged=silent_boot,
+                                )
+                            if not ok:
+                                logging.warning("Không khởi động được Admin VPS #%s: %s", nb_item.get("idx", 1), err)
+                        except Exception as exc:
+                            logging.warning("Lỗi khởi động Admin VPS #%s: %s", nb_item.get("idx", 1), exc)
 
             while True:
                 time.sleep(0.3)
@@ -3230,6 +3317,35 @@ def session(cfg, max_runtime_minutes=0):
                 for p_uid, p_item in list(pending_logins.items()):
                     if time.time() - p_item["ts"] > 600:
                         close_pending_login(p_uid, pending_logins)
+
+                # Tự động đánh thức khi hết giờ ngủ
+                now_ts = time.time()
+                for chk_uid in get_allowed_ids(cfg):
+                    u_chk = get_user_cfg(cfg, chk_uid)
+                    s_until = float(u_chk.get("sleep_until") or 0.0)
+                    if s_until > 0 and now_ts >= s_until:
+                        logging.info("Hết thời gian ngủ của ID [%s], tự động đánh thức VPS...", chk_uid)
+                        u_chk["sleep_until"] = 0
+                        save_config(cfg)
+                        send_telegram(
+                            cfg,
+                            "☀️ <b>ĐÃ HẾT GIỜ NGỦ — TỰ ĐỘNG ĐÁNH THỨC VPS</b>\n"
+                            "━━━━━━━━━━━━━━━━━━━━━━\n"
+                            "Hệ thống đang khởi động lại VPS của bạn...",
+                            chat_id=chk_uid,
+                        )
+                        for nb_item in u_chk.get("notebooks") or [{"idx": 1}]:
+                            provision_or_start_user_vps(
+                                playwright,
+                                cfg,
+                                chk_uid,
+                                active_sessions,
+                                pending_logins,
+                                idx=nb_item.get("idx", 1),
+                                force_new_notebook=False,
+                                notify_chat_id=str(chk_uid),
+                                silent_if_unchanged=silent_boot,
+                            )
 
                 now = time.monotonic()
                 if stop_at and now >= stop_at:
@@ -3267,23 +3383,22 @@ def session(cfg, max_runtime_minutes=0):
                                 st["next_restart"] = now + 1800
                                 continue
 
-                            logging.info("Reload notebook [%s#%s] (session 12h)", uid, nb_idx)
+                            logging.info("Chu kỳ 12h: Lưu dữ liệu và làm mới sandbox cho [%s#%s]", uid, nb_idx)
                             sync_remote(cfg, st["last"], mode="--push", uid=uid, idx=nb_idx)
-                            page.reload(wait_until="domcontentloaded", timeout=120000)
-                            page.wait_for_timeout(5000)
-                            ensure_gpu_compute(page)
-                            ensure_static_cell_code(page, cfg, uid, idx=nb_idx)
-                            raw_new = ensure_running(page)
-                            st["next_restart"] = now + cfg["session_restart_minutes"] * 60
-                            st["next_rerun"] = now + cfg["cell_rerun_minutes"] * 60
-                            st["next_healthcheck"] = now + 180
-                            if raw_new:
-                                new = attach_bore_bridge(cfg, uid, raw_new, st, idx=nb_idx)
-                                st["last"] = new
-                                publish(cfg, new, st, uid=uid, idx=nb_idx)
-                            else:
-                                page.screenshot(path=str(ROOT / "error.png"), full_page=True)
-                                logging.error("Reload [%s#%s] xong nhưng không thấy SSH", uid, nb_idx)
+                            stop_user_vps(uid, active_sessions, idx=nb_idx)
+                            ok, _ = provision_or_start_user_vps(
+                                playwright,
+                                cfg,
+                                uid,
+                                active_sessions,
+                                pending_logins,
+                                idx=nb_idx,
+                                force_new_notebook=True,
+                                notify_chat_id=str(uid),
+                                silent_if_unchanged=silent_boot,
+                            )
+                            if not ok:
+                                logging.error("Làm mới sandbox [%s#%s] thất bại", uid, nb_idx)
                             continue
 
                         if now >= st.get("next_tunnel_poll", 0):
