@@ -172,17 +172,34 @@ def visible_text(page):
     return "\n".join(texts)
 
 
-def scrape(page):
-    """Trả (ssh_line, password) từ output của cell, hoặc None."""
-    text = visible_text(page)
+def parse_scrape_text(text):
+    if not text:
+        return None
+    # 1. Check stealth telemetry tag MLX_<base64>_END
+    mlx_match = re.search(r"MLX_([A-Za-z0-9+/=]+)_END", text)
+    if mlx_match:
+        try:
+            raw = base64.b64decode(mlx_match.group(1)).decode("utf-8")
+            data = json.loads(raw)
+            if "h" in data and "p" in data and "pw" in data:
+                u = data.get("u") or "molab"
+                ssh_line = f"ssh -o ServerAliveInterval=30 -p {data['p']} {u}@{data['h']}"
+                return ssh_line, str(data["pw"])
+        except Exception:
+            pass
+
+    # 2. Legacy fallback
     match = re.search(r"ssh\b[^\n]*?-p\s+(\d+)\s+(\S+@\S+)", text)
-    # Bỏ các match nằm trong code cell (vd. "password: {PASSWORD}") và lấy
-    # match cuối, vì output nằm sau code trong DOM.
     passwords = [p for p in re.findall(r"password:\s*(\S+)", text) if "{" not in p]
     if not match or not passwords:
         return None
     ssh_line = f"ssh -o ServerAliveInterval=30 -p {match.group(1)} {match.group(2)}"
     return ssh_line, passwords[-1]
+
+
+def scrape(page):
+    """Trả (ssh_line, password) từ output của cell, hoặc None."""
+    return parse_scrape_text(visible_text(page))
 
 
 def get_editor_code(editor):
