@@ -2,6 +2,15 @@ import unittest
 import time
 
 class TestSleepMode(unittest.TestCase):
+    def setUp(self):
+        import keepalive
+        self._orig_save = keepalive.save_config
+        keepalive.save_config = lambda *args, **kwargs: None
+
+    def tearDown(self):
+        import keepalive
+        keepalive.save_config = self._orig_save
+
     def test_parse_sleep_duration(self):
         from keepalive import parse_sleep_duration
 
@@ -44,6 +53,26 @@ class TestSleepMode(unittest.TestCase):
         card = get_vps_status_card(cfg, None, uid="12345", idx=1)
         self.assertIn("Đang ngủ", card)
         self.assertIn("/wake", card)
+
+    def test_check_session_idle(self):
+        from keepalive import check_session_idle
+
+        st = {"last_busy": 1000.0}
+        
+        # When busy, reset last_busy and not idle
+        should_idle, idle_sec = check_session_idle(st, idle_limit_minutes=60, now_mono=2000.0, is_busy=True)
+        self.assertFalse(should_idle)
+        self.assertEqual(st["last_busy"], 2000.0)
+
+        # 30 mins later not busy -> not idle yet
+        should_idle, idle_sec = check_session_idle(st, idle_limit_minutes=60, now_mono=3800.0, is_busy=False)
+        self.assertFalse(should_idle)
+        self.assertEqual(idle_sec, 1800.0)
+
+        # 61 mins later not busy -> should idle!
+        should_idle, idle_sec = check_session_idle(st, idle_limit_minutes=60, now_mono=5700.0, is_busy=False)
+        self.assertTrue(should_idle)
+        self.assertGreaterEqual(idle_sec, 3600.0)
 
 if __name__ == "__main__":
     unittest.main()

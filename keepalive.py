@@ -140,6 +140,7 @@ def load_config():
     cfg.setdefault("headless", True)
     cfg.setdefault("session_restart_minutes", 725)
     cfg.setdefault("cell_rerun_minutes", 55)
+    cfg.setdefault("idle_sleep_minutes", 60)
     cfg.setdefault("output_file", "last_ssh.txt")
     cfg.setdefault("telegram_bot_token", "")
     cfg.setdefault("telegram_chat_id", "")
@@ -684,6 +685,18 @@ def is_user_sleeping(u_cfg, now=None):
     if sleep_until > now:
         return True, sleep_until - now
     return False, 0.0
+
+
+def check_session_idle(st, idle_limit_minutes, now_mono, is_busy=False):
+    if not st:
+        return False, 0.0
+    if is_busy:
+        st["last_busy"] = now_mono
+        return False, 0.0
+    last_busy = float(st.get("last_busy") or now_mono)
+    idle_sec = max(0.0, now_mono - last_busy)
+    limit_sec = float(idle_limit_minutes) * 60.0
+    return (idle_sec >= limit_sec), idle_sec
 
 
 def get_user_cfg(cfg, uid):
@@ -1944,6 +1957,8 @@ def provision_or_start_user_vps(
             "context": ctx,
             "page": page,
             "last": raw_result,
+            "last_busy": now,
+            "next_idle_check": now + 60,
             "next_rerun": now + cfg["cell_rerun_minutes"] * 60,
             "next_restart": now + cfg["session_restart_minutes"] * 60,
             "next_heartbeat": now + 30,
@@ -3368,6 +3383,47 @@ def session(cfg, max_runtime_minutes=0):
                             page.mouse.move(5, 5)
                             page.evaluate("1")
                             st["next_heartbeat"] = now + 30
+
+                        if now >= st.get("next_idle_check", 0):
+                            st["next_idle_check"] = now + 60
+                            is_busy = False
+                            if st.get("last"):
+                                try:
+                                    out = ssh_exec(
+                                        st["last"],
+                                        "who | grep pts || ps -ef | grep -E 'sshd:.*pts/' || nvidia-smi --query-gpu=utilization.gpu --format=csv,noheader,nounits 2>/dev/null",
+                                        timeout=5,
+                                    )
+                                    if out:
+                                        if "pts/" in out:
+                                            is_busy = True
+                                        else:
+                                            for line in out.splitlines():
+                                                if line.strip().isdigit() and int(line.strip()) > 5:
+                                                    is_busy = True
+                                                    break
+                                except Exception:
+                                    pass
+
+                            idle_limit = int(cfg.get("idle_sleep_minutes", 60))
+                            should_idle, idle_sec = check_session_idle(st, idle_limit, now, is_busy=is_busy)
+                            if should_idle:
+                                logging.info("VPS [%s#%s] không hoạt động %s phút (>= %s phút), tự động tắt cho nghỉ...", uid, nb_idx, int(idle_sec // 60), idle_limit)
+                                sync_remote(cfg, st["last"], mode="--push", uid=uid, idx=nb_idx)
+                                u_cfg = get_user_cfg(cfg, uid)
+                                u_cfg["sleep_until"] = time.time() + 86400 * 30
+                                save_config(cfg)
+                                stop_user_vps(uid, active_sessions, idx=nb_idx)
+                                send_telegram(
+                                    cfg,
+                                    f"💤 <b>TỰ ĐỘNG CHO NGHỈ DO KHÔNG HOẠT ĐỘNG ({idle_limit} PHÚT)</b>\n"
+                                    "━━━━━━━━━━━━━━━━━━━━━━\n"
+                                    f"• <b>VPS #{nb_idx}</b> (ID <code>{html.escape(str(uid))}</code>) đã được lưu dữ liệu lên Hugging Face và tắt an toàn.\n"
+                                    "• <i>Giúp bảo vệ 100% hạn mức GPU và tránh bị Molab quét AUP.</i>\n\n"
+                                    "👉 Khi cần dùng lại, chỉ cần gõ <code>/wake</code> (máy sẽ bật lại sau ~5 giây)!",
+                                    chat_id=str(uid),
+                                )
+                                continue
 
                         if now >= st["next_restart"]:
                             user_busy = False
