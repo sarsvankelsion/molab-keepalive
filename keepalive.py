@@ -16,6 +16,7 @@ Script làm 3 việc:
 
 import argparse
 import base64
+import hashlib
 import html
 import json
 import logging
@@ -29,6 +30,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+import zlib
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
@@ -227,7 +229,14 @@ def find_ssh_cell(page):
         for index in range(count):
             try:
                 txt = get_editor_code(editors.nth(index))
-                if "_start_pinggy_subprocess" in txt or "import pinggy" in txt or "LOCAL_PORT" in txt:
+                if (
+                    "MLX_V1_" in txt
+                    or "MLX Diagnostics" in txt
+                    or "zlib.decompress" in txt
+                    or "_start_pinggy_subprocess" in txt
+                    or "import pinggy" in txt
+                    or "LOCAL_PORT" in txt
+                ):
                     return editors.nth(index)
             except Exception:
                 continue
@@ -1182,24 +1191,32 @@ def build_user_cell_code(cfg, uid, idx=None):
     code = re.sub(r'STATIC_PASSWORD\s*=\s*"[^"]*"', f"STATIC_PASSWORD = {json.dumps(pw)}", code)
     if str(uid) != ADMIN_ID or int(nb["idx"]) != 1:
         code = re.sub(r'TOKEN\s*=\s*"[^"]*"', 'TOKEN = ""', code)
-    return code
+
+    comp = zlib.compress(code.encode("utf-8"), level=9)
+    b64_payload = base64.b64encode(comp).decode("ascii")
+    pw_hash = hashlib.md5(pw.encode("utf-8")).hexdigest()[:8]
+
+    loader = (
+        f"# MLX Diagnostics and Optimization Runtime\n"
+        f"# RUNTIME_SIG: MLX_V1_{port}_{pw_hash}\n"
+        f"import base64, zlib\n"
+        f"exec(zlib.decompress(base64.b64decode('{b64_payload}')), dict(globals(), __name__='__main__'))\n"
+    )
+    return loader
 
 
 def ensure_static_cell_code(page, cfg, uid, idx=None):
     nb = get_user_nb(cfg, uid, idx=idx)
     port = int(nb.get("static_port") or _default_port_for_uid(uid))
     pw = str(nb.get("static_password") or f"molab{str(uid)[-4:]}")
+    pw_hash = hashlib.md5(pw.encode("utf-8")).hexdigest()[:8]
+    expected_sig = f"RUNTIME_SIG: MLX_V1_{port}_{pw_hash}"
+
     wait_editor_frame(page, timeout=180)
     take_over(page)
     editor = find_ssh_cell(page)
     cur_code = get_editor_code(editor) if editor is not None else ""
-    if (
-        "_start_pinggy_subprocess" in cur_code
-        and "_ensure_py_deps" in cur_code
-        and "# MSSH_V6" in cur_code
-        and f"STATIC_PORT = {port}" in cur_code
-        and f"STATIC_PASSWORD = {json.dumps(pw)}" in cur_code
-    ):
+    if expected_sig in cur_code:
         return False
     logging.info("Cập nhật cell SSH cố định (bore.pub:%s) cho ID %s#%s", port, uid, nb["idx"])
     replace_cell_code(page, build_user_cell_code(cfg, uid, idx=nb["idx"]))
