@@ -3442,7 +3442,8 @@ def session(cfg, max_runtime_minutes=0):
                     push_controller_state(cfg, async_push=False)
                     return "MAX_RUNTIME_REACHED"
 
-                # Đồng bộ failover targets giữa Admin primary (7521313803) và Standby
+                # Đồng bộ failover targets giữa các máy trong cụm:
+                # 1. Admin primary (7521313803) và Standby
                 admin_st = active_sessions.get(session_key(ADMIN_ID, 1)) or active_sessions.get(ADMIN_ID)
                 standby_st = active_sessions.get(session_key("standby", 1)) or active_sessions.get("standby") or active_sessions.get(session_key(ADMIN_ID, 2))
                 if admin_st and standby_st:
@@ -3450,6 +3451,18 @@ def session(cfg, max_runtime_minutes=0):
                         admin_st["fallback_target"] = standby_st["raw_target"]
                     if admin_st.get("raw_target"):
                         standby_st["fallback_target"] = admin_st["raw_target"]
+
+                # 2. Mọi User khác có 2 máy (VPS #1 & VPS #2 từ 2 tài khoản Google)
+                for u_id in (cfg.get("users") or {}).keys():
+                    if str(u_id) in (ADMIN_ID, "standby"):
+                        continue
+                    u_st1 = active_sessions.get(session_key(u_id, 1)) or active_sessions.get(str(u_id))
+                    u_st2 = active_sessions.get(session_key(u_id, 2))
+                    if u_st1 and u_st2:
+                        if u_st2.get("raw_target"):
+                            u_st1["fallback_target"] = u_st2["raw_target"]
+                        if u_st1.get("raw_target"):
+                            u_st2["fallback_target"] = u_st1["raw_target"]
 
                 for skey, st in list(active_sessions.items()):
                     uid = st.get("uid", ADMIN_ID)
