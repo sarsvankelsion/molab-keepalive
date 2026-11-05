@@ -1650,23 +1650,30 @@ def close_pending_login(uid, pending_logins):
             pass
 
 
-def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_sessions):
+def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_sessions, acc_idx=1):
     uid = str(uid)
-    stop_user_vps(uid, active_sessions)
-    close_pending_login(uid, pending_logins)
+    acc_idx = int(acc_idx or 1)
+    login_key = f"{uid}_acc{acc_idx}" if acc_idx > 1 else uid
+    stop_user_vps(uid, active_sessions, idx=acc_idx)
+    close_pending_login(login_key, pending_logins)
     u = get_user_cfg(cfg, uid)
-    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"], uid=uid)
+    pdir = f"profiles/{login_key}"
+    ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=pdir, uid=login_key)
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     try:
         page.goto("https://molab.marimo.io/sign-in", wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(2000)
         if "/sign-in" not in page.url:
-            u["logged_in"] = True
-            u["email"] = email
-            save_context_storage_state(ctx, uid, cfg)
+            if acc_idx > 1:
+                u[f"email_acc{acc_idx}"] = email
+                u[f"logged_in_acc{acc_idx}"] = True
+            else:
+                u["logged_in"] = True
+                u["email"] = email
+            save_context_storage_state(ctx, login_key, cfg)
             save_config(cfg)
             ctx.close()
-            return True, f"✅ Tài khoản Molab (<code>{html.escape(email)}</code>) đã được đăng nhập sẵn! Bấm <b>🚀 Bật VPS hiện tại</b> để khởi tạo máy."
+            return True, f"✅ Tài khoản Molab #{acc_idx} (<code>{html.escape(email)}</code>) đã được đăng nhập sẵn! Bấm <b>🚀 Bật VPS hiện tại</b> để khởi tạo máy."
         inp = page.locator("input[name='identifier']").first
         inp.wait_for(state="visible", timeout=15000)
         inp.fill(email)
@@ -1674,20 +1681,21 @@ def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_
         page.wait_for_timeout(3500)
         body = page.inner_text("body")
         if page.locator("input[autocomplete='one-time-code']").count() or "Check your email" in body:
-            pending_logins[uid] = {"context": ctx, "page": page, "email": email, "ts": time.time()}
+            pending_logins[login_key] = {"context": ctx, "page": page, "email": email, "ts": time.time(), "acc_idx": acc_idx}
+            code_cmd = f"<code>/code {acc_idx} 123456</code>" if acc_idx > 1 else "<code>/code 123456</code>"
             return (
                 True,
-                "📧 <b>ĐÃ GỬI MÃ XÁC THỰC 6 SỐ VỀ GMAIL</b>\n"
+                f"📧 <b>ĐÃ GỬI MÃ XÁC THỰC 6 SỐ CHO TÀI KHOẢN #{acc_idx}</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• <b>Email:</b> <code>{html.escape(email)}</code>\n"
-                "• Hãy mở hộp thư Gmail nhận mã 6 số từ <b>marimo</b> rồi gõ:\n"
-                "<code>/code 123456</code>",
+                f"• <b>Email #{acc_idx}:</b> <code>{html.escape(email)}</code>\n"
+                f"• Hãy mở hộp thư Gmail nhận mã 6 số từ <b>marimo</b> rồi gõ:\n"
+                f"{code_cmd}",
             )
         ctx.close()
         return (
             False,
             "⚠️ <b>Không gửi được mã OTP cho email này.</b>\n"
-            "Hãy đảm bảo bạn đã từng bấm <b>Continue with Google</b> trên <a href='https://molab.marimo.io/sign-in'>molab.marimo.io</a> bằng Gmail này trước đó, hoặc dùng lệnh <code>/cookie &lt;__client&gt;</code>.",
+            "Hãy đảm bảo bạn đã từng bấm <b>Continue with Google</b> trên <a href='https://molab.marimo.io/sign-in'>molab.marimo.io</a> bằng Gmail này trước đó, hoặc dùng lệnh <code>/cookie <__client></code>.",
         )
     except Exception as exc:
         try:
@@ -1697,11 +1705,22 @@ def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_
         return False, f"❌ <b>Lỗi khởi tạo đăng nhập:</b> <code>{html.escape(str(exc))}</code>"
 
 
-def verify_molab_email_code(cfg, uid, code, pending_logins):
+def verify_molab_email_code(cfg, uid, code, pending_logins, acc_idx=None):
     uid = str(uid)
-    item = pending_logins.get(uid)
-    if not item:
+    target_key = None
+    if acc_idx:
+        k = f"{uid}_acc{acc_idx}" if int(acc_idx) > 1 else uid
+        if k in pending_logins:
+            target_key = k
+    if not target_key:
+        for k in (f"{uid}_acc2", uid):
+            if k in pending_logins:
+                target_key = k
+                break
+    if not target_key or target_key not in pending_logins:
         return False, "⚠️ Chưa có phiên đăng nhập nào đang chờ mã. Hãy gõ <code>/login email@gmail.com</code> trước."
+    item = pending_logins[target_key]
+    resolved_acc = int(item.get("acc_idx") or (2 if "_acc2" in target_key else 1))
     page = item["page"]
     email = item["email"]
     try:
@@ -1726,21 +1745,27 @@ def verify_molab_email_code(cfg, uid, code, pending_logins):
                 page.wait_for_timeout(2500)
             if "/sign-in" not in page.url and "/sign-up" not in page.url:
                 u = get_user_cfg(cfg, uid)
-                u["logged_in"] = True
-                u["email"] = email
-                save_context_storage_state(item.get("context"), uid, cfg)
+                if resolved_acc > 1:
+                    u[f"email_acc{resolved_acc}"] = email
+                    u[f"logged_in_acc{resolved_acc}"] = True
+                else:
+                    u["logged_in"] = True
+                    u["email"] = email
+                save_context_storage_state(item.get("context"), target_key, cfg)
                 save_config(cfg)
-                close_pending_login(uid, pending_logins)
+                close_pending_login(target_key, pending_logins)
+                note_247 = "\n• 💡 <i>Đã kích hoạt chế độ kép 24/7! Máy phụ sẽ gối đầu khi máy chính reset.</i>" if resolved_acc > 1 else ""
                 return (
                     True,
-                    "✅ <b>LIÊN KẾT TÀI KHOẢN MOLAB THÀNH CÔNG!</b>\n"
+                    f"✅ <b>LIÊN KẾT TÀI KHOẢN MOLAB #{resolved_acc} THÀNH CÔNG!</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"• <b>Tài khoản:</b> <code>{html.escape(email)}</code>\n"
-                    "• Giờ bạn có thể bấm nút <b>🚀 Bật VPS hiện tại</b> (<code>/newvps</code>) hoặc <b>➕ Tạo thêm VPS mới</b> (<code>/newvps new</code>)!",
+                    f"• <b>Tài khoản #{resolved_acc}:</b> <code>{html.escape(email)}</code>\n"
+                    "• Giờ bạn có thể bấm <b>🚀 Bật VPS hiện tại</b> hoặc <b>➕ Tạo thêm VPS mới</b>!"
+                    + note_247,
                 )
-        return False, "❌ <b>Mã xác thực không đúng hoặc đã hết hạn.</b> Vui lòng kiểm tra lại và gõ <code>/code &lt;6_số&gt;</code>."
+        return False, "❌ <b>Mã xác thực không đúng hoặc đã hết hạn.</b> Vui lòng kiểm tra lại và gõ <code>/code <6_số></code>."
     except Exception as exc:
-        close_pending_login(uid, pending_logins)
+        close_pending_login(target_key, pending_logins)
         return False, f"❌ <b>Lỗi xác thực mã:</b> <code>{html.escape(str(exc))}</code>"
 
 
@@ -1854,10 +1879,15 @@ def provision_or_start_user_vps(
     if skey in active_sessions:
         stop_user_vps(uid, active_sessions, idx=nb_idx)
 
-    shared_ctx = _find_user_context(uid, active_sessions)
+    acc_sub = f"{uid}_acc{nb_idx}"
+    use_sub = bool(int(nb_idx) > 1 and (STATE_DIR / f"storage_state_{acc_sub}.json").exists())
+    active_profile = f"profiles/{acc_sub}" if use_sub else u["profile_dir"]
+    active_uid = acc_sub if use_sub else uid
+
+    shared_ctx = _find_user_context(active_uid, active_sessions)
     created_ctx = False
     if shared_ctx is None:
-        ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=u["profile_dir"], uid=uid)
+        ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=active_profile, uid=active_uid)
         created_ctx = True
     else:
         ctx = shared_ctx
@@ -1959,11 +1989,12 @@ def provision_or_start_user_vps(
                 page.close()
             return False, f"❌ <b>Không khởi chạy được cell SSH trên VPS #{nb_idx}.</b>"
 
-        save_context_storage_state(ctx, uid, cfg)
+        save_context_storage_state(ctx, active_uid, cfg)
         now = time.monotonic()
         st = {
             "skey": skey,
             "uid": uid,
+            "sub_uid": active_uid,
             "idx": nb_idx,
             "context": ctx,
             "page": page,
@@ -2326,44 +2357,58 @@ def handle_telegram_commands(playwright, cfg, active_sessions, pending_logins, a
             send_telegram(cfg, target_banner + get_bot_help(is_admin=is_admin), chat_id=chat_id)
         elif cmd == "/guide":
             send_telegram(cfg, target_banner + get_member_guide(cfg, target_uid), chat_id=chat_id)
-        elif cmd == "/login":
+        elif cmd in ("/login", "/login2"):
             login_uid = target_uid if is_admin else chat_id
-            if not arg or "@" not in arg:
+            parts = arg.split(maxsplit=1)
+            target_acc = 2 if cmd == "/login2" else 1
+            email_val = arg
+            if len(parts) == 2 and parts[0] in ("1", "2") and "@" in parts[1]:
+                target_acc = int(parts[0])
+                email_val = parts[1]
+            elif "@" in arg:
+                email_val = arg.strip()
+
+            if not email_val or "@" not in email_val:
                 u = get_user_cfg(cfg, login_uid)
-                status_line = (
-                    f"✅ Đã liên kết: <code>{html.escape(u.get('email') or 'Đã đăng nhập')}</code>"
-                    if u.get("logged_in")
-                    else "❌ Chưa liên kết"
-                )
+                acc1_email = u.get("email") or "Chưa liên kết"
+                acc2_email = u.get("email_acc2") or "Chưa liên kết"
                 send_telegram(
                     cfg,
                     target_banner
                     + "🔗 <b>LIÊN KẾT TÀI KHOẢN MOLAB (GOOGLE)</b>\n"
                     "━━━━━━━━━━━━━━━━━━━━━━\n"
-                    f"• <b>Trạng thái (ID <code>{html.escape(login_uid)}</code>):</b> {status_line}\n\n"
-                    "Để liên kết tài khoản Molab (đăng ký bằng Google) của bạn:\n"
-                    "1️⃣ Gõ: <code>/login email_cua_ban@gmail.com</code>\n"
-                    "2️⃣ Mở Gmail lấy mã 6 số từ marimo và gõ: <code>/code 123456</code>\n\n"
-                    "<i>(Hoặc nâng cao: dán cookie bằng <code>/cookie &lt;giá_trị___client&gt;</code>)</i>",
+                    f"• <b>Tài khoản #1:</b> <code>{html.escape(acc1_email)}</code>\n"
+                    f"• <b>Tài khoản #2 (Dự phòng 24/7):</b> <code>{html.escape(acc2_email)}</code>\n\n"
+                    "👉 <b>Cách liên kết tài khoản:</b>\n"
+                    "• Tài khoản chính: <code>/login email_chinh@gmail.com</code>\n"
+                    "• Tài khoản phụ (để treo 24/7): <code>/login 2 email_phu@gmail.com</code>\n"
+                    "• Nhập mã xác nhận: <code>/code 123456</code> (hoặc <code>/code 2 123456</code>)\n\n"
+                    "💡 <i>Khi có 2 tài khoản, bạn có thể tạo VPS #2 chạy gối đầu không bao giờ bị ngắt quãng!</i>",
                     chat_id=chat_id,
                 )
                 continue
             send_telegram(
                 cfg,
-                f"⏳ <b>Đang gửi yêu cầu mã xác thực tới <code>{html.escape(arg)}</code>...</b>",
+                f"⏳ <b>Đang gửi yêu cầu mã xác thực cho Tài khoản #{target_acc}: <code>{html.escape(email_val)}</code>...</b>",
                 chat_id=chat_id,
                 menu=False,
             )
-            _, msg_out = start_molab_email_login(playwright, cfg, login_uid, arg, pending_logins, active_sessions)
+            _, msg_out = start_molab_email_login(playwright, cfg, login_uid, email_val, pending_logins, active_sessions, acc_idx=target_acc)
             send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
-        elif cmd == "/code":
+        elif cmd in ("/code", "/code2"):
             login_uid = target_uid if is_admin else chat_id
-            code = re.sub(r"\D", "", arg)
+            parts = arg.split(maxsplit=1)
+            target_acc = 2 if cmd == "/code2" else None
+            code_val = arg
+            if len(parts) == 2 and parts[0] in ("1", "2"):
+                target_acc = int(parts[0])
+                code_val = parts[1]
+            code = re.sub(r"\D", "", code_val)
             if len(code) != 6:
-                send_telegram(cfg, "🔢 <b>Cách dùng:</b> <code>/code 123456</code> (6 chữ số trong Gmail)", chat_id=chat_id)
+                send_telegram(cfg, "🔢 <b>Cách dùng:</b> <code>/code 123456</code> (hoặc <code>/code 2 123456</code>)", chat_id=chat_id)
                 continue
             send_telegram(cfg, "⏳ <b>Đang kiểm tra mã xác thực 6 số...</b>", chat_id=chat_id, menu=False)
-            _, msg_out = verify_molab_email_code(cfg, login_uid, code, pending_logins)
+            _, msg_out = verify_molab_email_code(cfg, login_uid, code, pending_logins, acc_idx=target_acc)
             send_telegram(cfg, target_banner + msg_out, chat_id=chat_id)
         elif cmd == "/cookie":
             login_uid = target_uid if is_admin else chat_id
@@ -3382,7 +3427,7 @@ def session(cfg, max_runtime_minutes=0):
                     logging.info("Đạt giới hạn phiên Cloud (%s phút), đang lưu trạng thái để chuyển ca...", max_runtime_minutes)
                     seen_uids = set()
                     for st in list(active_sessions.values()):
-                        u_id = str(st.get("uid", ADMIN_ID))
+                        u_id = str(st.get("sub_uid") or st.get("uid", ADMIN_ID))
                         if u_id not in seen_uids and st.get("context"):
                             seen_uids.add(u_id)
                             save_context_storage_state(st["context"], u_id, cfg)
