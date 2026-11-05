@@ -33,6 +33,17 @@ import urllib.request
 import zlib
 from pathlib import Path
 
+if sys.stdout and hasattr(sys.stdout, "reconfigure"):
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+if sys.stderr and hasattr(sys.stderr, "reconfigure"):
+    try:
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
 from playwright.sync_api import sync_playwright
 
 ROOT = Path(__file__).resolve().parent
@@ -585,7 +596,16 @@ def get_member_guide(cfg, uid):
         "<b>5️⃣ TẠO NHIỀU VPS ĐỘC LẬP</b>\n"
         "• Bật VPS đang chọn: <code>/newvps</code>\n"
         "• Tạo thêm VPS mới: <code>/newvps new</code> (mỗi máy có port SSH riêng)\n"
-        "• Quản lý danh sách: <code>/vps</code> | Đổi máy điều khiển: <code>/use &lt;số_máy&gt;</code>\n"
+        "• Quản lý danh sách: <code>/vps</code> | Đổi máy điều khiển: <code>/use &lt;số_máy&gt;</code>\n\n"
+        "<b>6️⃣ TREO 24/7 KHÔNG GIÁN ĐOẠN (CHẾ ĐỘ 2 TÀI KHOẢN GỐI ĐẦU)</b>\n"
+        "• <b>Cách liên kết 2 tài khoản Google:</b>\n"
+        "  ▫️ Tài khoản 1: <code>/login email1@gmail.com</code> rồi nhập <code>/code 123456</code>\n"
+        "  ▫️ Tài khoản 2: <code>/login 2 email2@gmail.com</code> rồi nhập <code>/code 2 123456</code>\n"
+        "  ▫️ Khởi tạo máy thứ 2: Gõ <code>/newvps new</code> (hoặc bấm nút <b>➕ Tạo thêm VPS mới</b>)\n"
+        "• <b>Tự động chuyển tiếp (Failover):</b>\n"
+        "  ▫️ Bạn chỉ cần kết nối duy nhất <b>1 cổng SSH chính và 1 mật khẩu</b> của VPS #1.\n"
+        "  ▫️ Khi VPS #1 bảo trì hoặc chạm mốc 12h, hệ thống tự động bẻ luồng ngầm sang VPS #2.\n"
+        "  ▫️ Không cần đổi cổng hay thao tác thủ công, kết nối luôn giữ nguyên 24/7!\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
         "💡 <i>Gõ <code>/help</code> để mở bảng điều khiển nút bấm nhanh.</i>"
     )
@@ -610,10 +630,10 @@ def get_bot_help(is_admin=False):
         "• <code>/deploy &lt;lệnh&gt;</code> — Chạy app ngầm & tự sống lại sau 12h\n"
         "• <code>/apps</code> | <code>/applog &lt;id&gt;</code> | <code>/undep &lt;id&gt;</code> — Quản lý app ngầm\n"
         "• <code>/wings</code> — Quản lý Pterodactyl Wings & Docker Shim\n\n"
-        "⚙️ <b>Hệ thống</b>\n"
+        "⚙️ <b>Hệ thống & Treo 24/7</b>\n"
         "• <code>/status</code> — Kiểm tra GPU, Uptime | <code>/restart</code> — Khởi động lại\n"
         "• <code>/sleep &lt;giờ&gt;</code> — Tắt đi ngủ tránh AUP | <code>/wake</code> — Đánh thức VPS\n"
-        "• <code>/login email@gmail.com</code> | <code>/code 123456</code> — Liên kết Molab\n"
+        "• <code>/login [2] &lt;email&gt;</code> | <code>/code [2] &lt;mã&gt;</code> — Liên kết 2 tài khoản chạy 24/7\n"
     )
     if is_admin:
         base += (
@@ -845,10 +865,12 @@ def tg_api(cfg, method, payload=None, timeout=10):
     if not token:
         return None
     url = f"https://api.telegram.org/bot{token}/{method}"
-    data = urllib.parse.urlencode(payload).encode() if payload else None
+    data = urllib.parse.urlencode(payload, encoding="utf-8").encode("utf-8") if payload else None
+    headers = {"Content-Type": "application/x-www-form-urlencoded; charset=utf-8"} if data else {}
+    req = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with urllib.request.urlopen(url, data=data, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return json.loads(resp.read().decode("utf-8", "replace"))
     except Exception as exc:
         logging.debug("Telegram API %s lỗi: %s", method, exc)
         return None
@@ -949,6 +971,12 @@ def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, idx=None, title="🔑
         f"👤 <b>Chủ VPS (ID):</b> <code>{html.escape(str(uid))}</code> ({html.escape(u.get('email') or 'Chưa rõ')})\n"
         f"🖥 <b>Máy VPS:</b> <b>#{nb_idx}</b> / {len(u['notebooks'])} máy  |  <b>Cổng riêng:</b> <code>bore.pub:{nb['static_port']}</code>\n"
     )
+    has_dual = bool(u.get("logged_in_acc2") or len(u.get("notebooks", [])) > 1 or str(uid) == ADMIN_ID)
+    failover_line = (
+        "🛡 <b>Chế độ 24/7 Failover:</b> 🟢 Đang bật (tự động chuyển tiếp máy phụ khi reload)\n"
+        if has_dual
+        else "🛡 <b>Chế độ 24/7 Failover:</b> ⚪ Chưa bật (gõ <code>/login 2 &lt;email&gt;</code> để kích hoạt)\n"
+    )
     return (
         f"{title}\n"
         "━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -956,6 +984,7 @@ def format_ssh_card(cfg, result, state=None, uid=ADMIN_ID, idx=None, title="🔑
         f"📡 <b>Trạng thái:</b> {alive}\n"
         f"🕒 <b>Cập nhật:</b> <code>{time.strftime('%H:%M:%S — %d/%m/%Y')}</code>\n"
         f"{timers}"
+        f"{failover_line}"
         f"{hf_line}"
         "🖥 <b>Lệnh SSH cố định</b> <i>(chạm để copy)</i>:\n"
         f"<code>{html.escape(ssh_line)}</code>\n\n"
@@ -984,8 +1013,8 @@ def init_telegram_bot(cfg):
         {"command": "apps", "description": "📋 Xem & quản lý các App đang chạy ngầm"},
         {"command": "wings", "description": "🦅 Bật/quản lý Pterodactyl Wings + Docker Shim"},
         {"command": "undep", "description": "🗑 Dừng & xoá App chạy ngầm: /undep <số>"},
-        {"command": "login", "description": "🔗 Liên kết acc Molab (Google): /login <email>"},
-        {"command": "code", "description": "🔢 Nhập mã 6 số từ Gmail: /code <mã>"},
+        {"command": "login", "description": "🔗 Liên kết acc Molab (treo 24/7): /login [2] <email>"},
+        {"command": "code", "description": "🔢 Nhập mã 6 số từ Gmail: /code [2] <mã>"},
         {"command": "rotate", "description": "🔄 Làm mới kết nối tunnel SSH ngay"},
         {"command": "save", "description": "💾 Đồng bộ dữ liệu lên Hugging Face ngay"},
         {"command": "pkgs", "description": "📦 Danh sách gói apt/pip tự cài"},
