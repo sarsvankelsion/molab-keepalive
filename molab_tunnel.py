@@ -4,6 +4,8 @@ import subprocess
 import sys
 import time
 
+sys.stdout.reconfigure(encoding="utf-8")
+
 key_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "molab_key")
 PORTS = [43803, 43804]
 
@@ -30,7 +32,7 @@ while True:
         if is_port_open("bore.pub", 43804):
             target_port = 43804
             print(
-                f"⚡ Primary port 43803 offline -> Failover to Standby port {target_port}",
+                f"[FAILOVER] Primary port 43803 offline -> Failover to Standby port {target_port}",
                 flush=True,
             )
         else:
