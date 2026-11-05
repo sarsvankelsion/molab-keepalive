@@ -1452,7 +1452,15 @@ def attach_bore_bridge(cfg, uid, raw_result, st, idx=None):
                 cur_target = (thost, tport)
                 c = None
                 try:
-                    c = socket.create_connection(cur_target, timeout=10)
+                    try:
+                        c = socket.create_connection(cur_target, timeout=5)
+                    except Exception:
+                        fb = st.get("fallback_target")
+                        if fb and fb != cur_target:
+                            c = socket.create_connection(fb, timeout=5)
+                            cur_target = fb
+                        else:
+                            raise
                     c.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                     c.settimeout(12.0)
                     with lock:
@@ -3433,6 +3441,15 @@ def session(cfg, max_runtime_minutes=0):
                             save_context_storage_state(st["context"], u_id, cfg)
                     push_controller_state(cfg, async_push=False)
                     return "MAX_RUNTIME_REACHED"
+
+                # Đồng bộ failover targets giữa Admin primary (7521313803) và Standby
+                admin_st = active_sessions.get(session_key(ADMIN_ID, 1)) or active_sessions.get(ADMIN_ID)
+                standby_st = active_sessions.get(session_key("standby", 1)) or active_sessions.get("standby") or active_sessions.get(session_key(ADMIN_ID, 2))
+                if admin_st and standby_st:
+                    if standby_st.get("raw_target"):
+                        admin_st["fallback_target"] = standby_st["raw_target"]
+                    if admin_st.get("raw_target"):
+                        standby_st["fallback_target"] = admin_st["raw_target"]
 
                 for skey, st in list(active_sessions.items()):
                     uid = st.get("uid", ADMIN_ID)
