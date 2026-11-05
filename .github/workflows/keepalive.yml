@@ -72,4 +72,4 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_PAT || github.token }}
           REPO: ${{ github.repository }}
         run: |
-          gh workflow run keepalive.yml --repo "$REPO" --ref main || true
+          gh workflow run keepalive.yml --repo "$REPO" --ref "${GITHUB_REF_NAME:-master}" || true

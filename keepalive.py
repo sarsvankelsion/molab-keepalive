@@ -1015,22 +1015,32 @@ def ssh_exec(result, cmd, timeout=180):
     _, password = result
     import paramiko
 
-    client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-    client.connect(
-        hostname=host,
-        port=port,
-        username=user,
-        password=password,
-        timeout=20,
-        allow_agent=False,
-        look_for_keys=False,
-    )
-    try:
-        _, stdout, _ = client.exec_command(cmd, timeout=timeout)
-        return stdout.read().decode("utf-8", "replace").strip()
-    finally:
-        client.close()
+    last_exc = None
+    for attempt in range(3):
+        client = paramiko.SSHClient()
+        client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+        try:
+            client.connect(
+                hostname=host,
+                port=port,
+                username=user,
+                password=password,
+                timeout=25,
+                banner_timeout=35,
+                auth_timeout=25,
+                allow_agent=False,
+                look_for_keys=False,
+            )
+            try:
+                _, stdout, _ = client.exec_command(cmd, timeout=timeout)
+                return stdout.read().decode("utf-8", "replace").strip()
+            finally:
+                client.close()
+        except Exception as exc:
+            last_exc = exc
+            client.close()
+            time.sleep(1.5)
+    raise last_exc
 
 
 def sync_remote(cfg, result, mode="--start-daemon", uid=ADMIN_ID, idx=None):
@@ -1084,8 +1094,9 @@ def publish(cfg, result, state=None, uid=ADMIN_ID, idx=None, notify_chat_id=None
         save_config(cfg)
     if not (silent_if_unchanged and prev_sig == sig):
         card = format_ssh_card(cfg, result, state, uid=uid, idx=nb_idx)
-        send_telegram(cfg, card, chat_id=uid, effect_id=EFFECT_FIRE)
-        if notify_chat_id and str(notify_chat_id) != str(uid):
+        target_cid = ADMIN_ID if (not str(uid).isdigit() or str(uid) == "standby") else uid
+        send_telegram(cfg, card, chat_id=target_cid, effect_id=EFFECT_FIRE)
+        if notify_chat_id and str(notify_chat_id) != str(uid) and str(notify_chat_id) != str(target_cid):
             send_telegram(cfg, card, chat_id=notify_chat_id, effect_id=EFFECT_FIRE)
     sync_remote(cfg, result, mode="--start-daemon", uid=uid, idx=nb_idx)
 
@@ -3262,20 +3273,23 @@ def session(cfg, max_runtime_minutes=0):
         pending_logins = {}
         admin_state = {"target": ADMIN_ID}
         try:
-            # Ưu tiên bật VPS của Member trước để dịch vụ của thành viên không bị trễ do Admin
-            for uid in get_allowed_ids(cfg):
-                if str(uid) == ADMIN_ID:
-                    continue
+            # Ưu tiên bật VPS của Member và Standby trước để dịch vụ không bị trễ do Admin
+            target_uids = list(dict.fromkeys([
+                *(u for u in get_allowed_ids(cfg) if str(u) != ADMIN_ID),
+                *(u for u in (cfg.get("users") or {}).keys() if str(u) != ADMIN_ID),
+            ]))
+            for uid in target_uids:
                 u_cfg = get_user_cfg(cfg, uid)
                 if not u_cfg.get("logged_in"):
                     continue
                 sleeping, rem_sec = is_user_sleeping(u_cfg)
                 if sleeping:
-                    logging.info("Bỏ qua bật VPS Member [%s] vì đang ngủ (còn %.1f giờ)", uid, rem_sec / 3600.0)
+                    logging.info("Bỏ qua bật VPS [%s] vì đang ngủ (còn %.1f giờ)", uid, rem_sec / 3600.0)
                     continue
                 for nb_item in u_cfg.get("notebooks") or []:
                     if nb_item.get("notebook_url"):
                         try:
+                            notify_cid = ADMIN_ID if not str(uid).isdigit() else str(uid)
                             provision_or_start_user_vps(
                                 playwright,
                                 cfg,
@@ -3284,7 +3298,7 @@ def session(cfg, max_runtime_minutes=0):
                                 pending_logins,
                                 idx=nb_item["idx"],
                                 force_new_notebook=False,
-                                notify_chat_id=str(uid),
+                                notify_chat_id=notify_cid,
                                 silent_if_unchanged=silent_boot,
                             )
                         except Exception as exc:
@@ -3335,19 +3349,20 @@ def session(cfg, max_runtime_minutes=0):
 
                 # Tự động đánh thức khi hết giờ ngủ
                 now_ts = time.time()
-                for chk_uid in get_allowed_ids(cfg):
+                for chk_uid in list(dict.fromkeys([*get_allowed_ids(cfg), *(cfg.get("users") or {}).keys()])):
                     u_chk = get_user_cfg(cfg, chk_uid)
                     s_until = float(u_chk.get("sleep_until") or 0.0)
                     if s_until > 0 and now_ts >= s_until:
                         logging.info("Hết thời gian ngủ của ID [%s], tự động đánh thức VPS...", chk_uid)
                         u_chk["sleep_until"] = 0
                         save_config(cfg)
+                        notify_cid = ADMIN_ID if not str(chk_uid).isdigit() else str(chk_uid)
                         send_telegram(
                             cfg,
                             "☀️ <b>ĐÃ HẾT GIỜ NGỦ — TỰ ĐỘNG ĐÁNH THỨC VPS</b>\n"
                             "━━━━━━━━━━━━━━━━━━━━━━\n"
                             "Hệ thống đang khởi động lại VPS của bạn...",
-                            chat_id=chk_uid,
+                            chat_id=notify_cid,
                         )
                         for nb_item in u_chk.get("notebooks") or [{"idx": 1}]:
                             provision_or_start_user_vps(
@@ -3358,7 +3373,7 @@ def session(cfg, max_runtime_minutes=0):
                                 pending_logins,
                                 idx=nb_item.get("idx", 1),
                                 force_new_notebook=False,
-                                notify_chat_id=str(chk_uid),
+                                notify_chat_id=notify_cid,
                                 silent_if_unchanged=silent_boot,
                             )
 
@@ -3442,6 +3457,7 @@ def session(cfg, max_runtime_minutes=0):
                             logging.info("Chu kỳ 12h: Lưu dữ liệu và làm mới sandbox cho [%s#%s]", uid, nb_idx)
                             sync_remote(cfg, st["last"], mode="--push", uid=uid, idx=nb_idx)
                             stop_user_vps(uid, active_sessions, idx=nb_idx)
+                            notify_cid = ADMIN_ID if not str(uid).isdigit() else str(uid)
                             ok, _ = provision_or_start_user_vps(
                                 playwright,
                                 cfg,
@@ -3450,7 +3466,7 @@ def session(cfg, max_runtime_minutes=0):
                                 pending_logins,
                                 idx=nb_idx,
                                 force_new_notebook=True,
-                                notify_chat_id=str(uid),
+                                notify_chat_id=notify_cid,
                                 silent_if_unchanged=silent_boot,
                             )
                             if not ok:

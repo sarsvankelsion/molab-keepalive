@@ -7,6 +7,9 @@ from pathlib import Path
 
 class TestCellCode(unittest.TestCase):
     def setUp(self):
+        import keepalive
+        self._orig_save = keepalive.save_config
+        keepalive.save_config = lambda *args, **kwargs: None
         self.cfg = {
             "admin_id": "7521313803",
             "users": {
@@ -19,6 +22,10 @@ class TestCellCode(unittest.TestCase):
                 }
             }
         }
+
+    def tearDown(self):
+        import keepalive
+        keepalive.save_config = self._orig_save
 
     def test_cell_code_contains_no_sensitive_keywords(self):
         from keepalive import build_user_cell_code
