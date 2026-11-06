@@ -1683,6 +1683,30 @@ def ensure_gpu_compute(page):
     return False
 
 
+def _extract_jwt_email(token):
+    try:
+        parts = (token or "").split(".")
+        if len(parts) >= 2:
+            padded = parts[1] + "=" * ((4 - len(parts[1]) % 4) % 4)
+            data = json.loads(base64.urlsafe_b64decode(padded).decode("utf-8"))
+            return (data.get("email") or "").strip().lower()
+    except Exception:
+        pass
+    return ""
+
+
+def get_context_logged_in_email(ctx):
+    try:
+        for c in ctx.cookies():
+            if c.get("name") in ("__session", "__session_DtbpIAMT"):
+                em = _extract_jwt_email(c.get("value"))
+                if em:
+                    return em
+    except Exception:
+        pass
+    return ""
+
+
 def close_pending_login(uid, pending_logins):
     item = pending_logins.pop(str(uid), None)
     if item:
@@ -1694,6 +1718,7 @@ def close_pending_login(uid, pending_logins):
 
 def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_sessions, acc_idx=1):
     uid = str(uid)
+    clean_email = email.strip().lower()
     acc_idx = int(acc_idx or 1)
     login_key = f"{uid}_acc{acc_idx}" if acc_idx > 1 else uid
     stop_user_vps(uid, active_sessions, idx=acc_idx)
@@ -1701,35 +1726,56 @@ def start_molab_email_login(playwright, cfg, uid, email, pending_logins, active_
     u = get_user_cfg(cfg, uid)
     pdir = f"profiles/{login_key}"
     ctx = open_context(playwright, cfg, headless=cfg["headless"], profile_dir=pdir, uid=login_key)
+
+    cur_email = get_context_logged_in_email(ctx)
+    if cur_email and cur_email != clean_email:
+        logging.info("Context [%s] đang lưu cookie của [%s], người dùng muốn login [%s] -> Xóa cookie cũ", login_key, cur_email, clean_email)
+        try:
+            ctx.clear_cookies()
+        except Exception:
+            pass
+        (STATE_DIR / f"storage_state_{login_key}.json").unlink(missing_ok=True)
+
     page = ctx.pages[0] if ctx.pages else ctx.new_page()
     try:
         page.goto("https://molab.marimo.io/sign-in", wait_until="networkidle", timeout=60000)
         page.wait_for_timeout(2000)
-        if "/sign-in" not in page.url:
+
+        cur_email = get_context_logged_in_email(ctx)
+        if "/sign-in" not in page.url and cur_email == clean_email:
             if acc_idx > 1:
-                u[f"email_acc{acc_idx}"] = email
+                u[f"email_acc{acc_idx}"] = clean_email
                 u[f"logged_in_acc{acc_idx}"] = True
             else:
                 u["logged_in"] = True
-                u["email"] = email
+                u["email"] = clean_email
             save_context_storage_state(ctx, login_key, cfg)
             save_config(cfg)
             ctx.close()
-            return True, f"✅ Tài khoản Molab #{acc_idx} (<code>{html.escape(email)}</code>) đã được đăng nhập sẵn! Bấm <b>🚀 Bật VPS hiện tại</b> để khởi tạo máy."
+            return True, f"✅ Tài khoản Molab #{acc_idx} (<code>{html.escape(clean_email)}</code>) đã được đăng nhập sẵn! Bấm <b>🚀 Bật VPS hiện tại</b> để khởi tạo máy."
+
+        if "/sign-in" not in page.url:
+            try:
+                ctx.clear_cookies()
+            except Exception:
+                pass
+            page.goto("https://molab.marimo.io/sign-in", wait_until="networkidle", timeout=60000)
+            page.wait_for_timeout(2000)
+
         inp = page.locator("input[name='identifier']").first
         inp.wait_for(state="visible", timeout=15000)
-        inp.fill(email)
+        inp.fill(clean_email)
         page.locator("button.cl-formButtonPrimary").first.click()
         page.wait_for_timeout(3500)
         body = page.inner_text("body")
         if page.locator("input[autocomplete='one-time-code']").count() or "Check your email" in body:
-            pending_logins[login_key] = {"context": ctx, "page": page, "email": email, "ts": time.time(), "acc_idx": acc_idx}
+            pending_logins[login_key] = {"context": ctx, "page": page, "email": clean_email, "ts": time.time(), "acc_idx": acc_idx}
             code_cmd = f"<code>/code {acc_idx} 123456</code>" if acc_idx > 1 else "<code>/code 123456</code>"
             return (
                 True,
                 f"📧 <b>ĐÃ GỬI MÃ XÁC THỰC 6 SỐ CHO TÀI KHOẢN #{acc_idx}</b>\n"
                 "━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"• <b>Email #{acc_idx}:</b> <code>{html.escape(email)}</code>\n"
+                f"• <b>Email #{acc_idx}:</b> <code>{html.escape(clean_email)}</code>\n"
                 f"• Hãy mở hộp thư Gmail nhận mã 6 số từ <b>marimo</b> rồi gõ:\n"
                 f"{code_cmd}",
             )
@@ -1790,9 +1836,16 @@ def verify_molab_email_code(cfg, uid, code, pending_logins, acc_idx=None):
                 if resolved_acc > 1:
                     u[f"email_acc{resolved_acc}"] = email
                     u[f"logged_in_acc{resolved_acc}"] = True
+                    nb = get_user_nb(cfg, uid, idx=resolved_acc)
+                    nb["notebook_url"] = ""
                 else:
                     u["logged_in"] = True
                     u["email"] = email
+                    nb = get_user_nb(cfg, uid, idx=1)
+                    nb["notebook_url"] = ""
+                    u["notebook_url"] = ""
+                    if uid == ADMIN_ID:
+                        cfg["notebook_url"] = ""
                 save_context_storage_state(item.get("context"), target_key, cfg)
                 save_config(cfg)
                 close_pending_login(target_key, pending_logins)
