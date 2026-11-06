@@ -1643,6 +1643,11 @@ def attach_bore_bridge(cfg, uid, raw_result, st, idx=None):
 
 def ensure_gpu_compute(page):
     try:
+        page_body = page.inner_text("body")
+        if "GPU access is temporarily restricted" in page_body:
+            logging.warning("⚠️ Tài khoản Molab đã bị giới hạn GPU tạm thời (GPU access is temporarily restricted). Máy đang chạy ở chế độ CPU!")
+            return False
+
         btn = page.locator("button[title='Configure compute']").first
         btn.wait_for(state="visible", timeout=30000)
         label = (btn.inner_text(timeout=3000) or "").strip()
